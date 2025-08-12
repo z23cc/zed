@@ -44,6 +44,7 @@ impl MentionUri {
         }
     }
 
+    // todo! return something that implements display to avoid extra allocs
     pub fn to_link(&self) -> String {
         let name = self.name();
         let uri = self.to_uri();

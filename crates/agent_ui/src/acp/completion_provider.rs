@@ -161,7 +161,7 @@ fn search(
                 search_symbols_task
                     .await
                     .into_iter()
-                    .map(Match::Symbol)
+                    .map(|symbol| Match::Symbol(symbol))
                     .collect()
             })
         }
@@ -621,7 +621,7 @@ impl ContextPickerCompletionProvider {
         };
 
         let file_uri = MentionUri::File(abs_path.into());
-        let new_text = file_uri.to_link();
+        let new_text = format!("{} ", file_uri.to_link());
         let new_text_len = new_text.len();
         Some(Completion {
             replace_range: source_range.clone(),
@@ -653,65 +653,53 @@ impl ContextPickerCompletionProvider {
         workspace: Entity<Workspace>,
         cx: &mut App,
     ) -> Option<Completion> {
-        None
-        // let path_prefix = workspace
-        //     .read(cx)
-        //     .project()
-        //     .read(cx)
-        //     .worktree_for_id(symbol.path.worktree_id, cx)?
-        //     .read(cx)
-        //     .root_name();
+        let path_prefix = workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .worktree_for_id(symbol.path.worktree_id, cx)?
+            .read(cx)
+            .root_name();
 
-        // let (file_name, directory) =
-        //     crate::context_picker::file_context_picker::extract_file_name_and_directory(
-        //         &symbol.path.path,
-        //         path_prefix,
-        //     );
-        // let full_path = if let Some(directory) = directory {
-        //     format!("{}{}", directory, file_name)
-        // } else {
-        //     file_name.to_string()
-        // };
+        let (file_name, directory) =
+            crate::context_picker::file_context_picker::extract_file_name_and_directory(
+                &symbol.path.path,
+                path_prefix,
+            );
+        let full_path = if let Some(directory) = directory {
+            format!("{}{}", directory, file_name)
+        } else {
+            file_name.to_string()
+        };
 
-        // let comment_id = cx.theme().syntax().highlight_id("comment").map(HighlightId);
-        // let mut label = CodeLabel::plain(symbol.name.clone(), None);
-        // label.push_str(" ", None);
-        // label.push_str(&file_name, comment_id);
-        // label.push_str(&format!(" L{}", symbol.range.start.0.row + 1), comment_id);
+        let comment_id = cx.theme().syntax().highlight_id("comment").map(HighlightId);
+        let mut label = CodeLabel::plain(symbol.name.clone(), None);
+        label.push_str(" ", None);
+        label.push_str(&file_name, comment_id);
+        label.push_str(&format!(" L{}", symbol.range.start.0.row + 1), comment_id);
 
-        // let new_text = MentionUri::Symbol(full_path.into(), symbol.name.clone()).to_link();
-        // let new_text_len = new_text.len();
-        // Some(Completion {
-        //     replace_range: source_range.clone(),
-        //     new_text,
-        //     label,
-        //     documentation: None,
-        //     source: project::CompletionSource::Custom,
-        //     icon_path: Some(IconName::Code.path().into()),
-        //     insert_text_mode: None,
-        //     confirm: Some(confirm_completion_callback(
-        //         IconName::Code.path().into(),
-        //         symbol.name.clone().into(),
-        //         excerpt_id,
-        //         source_range.start,
-        //         new_text_len - 1,
-        //         editor.clone(),
-        //         context_store.clone(),
-        //         move |_, cx| {
-        //             let symbol = symbol.clone();
-        //             let context_store = context_store.clone();
-        //             let workspace = workspace.clone();
-        //             let result = crate::context_picker::symbol_context_picker::add_symbol(
-        //                 symbol.clone(),
-        //                 false,
-        //                 workspace.clone(),
-        //                 context_store.downgrade(),
-        //                 cx,
-        //             );
-        //             cx.spawn(async move |_| result.await.log_err()?.0)
-        //         },
-        //     )),
-        // })
+        let uri = MentionUri::Symbol(full_path.into(), symbol.name.clone());
+        let new_text = format!("{} ", uri.to_link());
+        let new_text_len = new_text.len();
+        Some(Completion {
+            replace_range: source_range.clone(),
+            new_text,
+            label,
+            documentation: None,
+            source: project::CompletionSource::Custom,
+            icon_path: Some(IconName::Code.path().into()),
+            insert_text_mode: None,
+            confirm: Some(confirm_completion_callback(
+                IconName::Code.path().into(),
+                symbol.name.clone().into(),
+                excerpt_id,
+                source_range.start,
+                new_text_len - 1,
+                editor.clone(),
+                mention_set.clone(),
+                uri,
+            )),
+        })
     }
 }
 
