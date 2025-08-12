@@ -141,7 +141,11 @@ impl AcpThreadView {
             editor.set_completion_provider(Some(Rc::new(ContextPickerCompletionProvider::new(
                 mention_set.clone(),
                 workspace.clone(),
+                // todo! provide thread stores
+                None,
+                None,
                 cx.weak_entity(),
+                None,
             ))));
             editor.set_context_menu_options(ContextMenuOptions {
                 min_entries_visible: 12,
@@ -3002,7 +3006,7 @@ impl AcpThreadView {
                 .unwrap_or(path.path.as_os_str())
                 .display()
                 .to_string();
-            let completion = ContextPickerCompletionProvider::completion_for_path(
+            let Some(completion) = ContextPickerCompletionProvider::completion_for_path(
                 path,
                 &path_prefix,
                 false,
@@ -3013,7 +3017,9 @@ impl AcpThreadView {
                 self.mention_set.clone(),
                 self.project.clone(),
                 cx,
-            );
+            ) else {
+                continue;
+            };
 
             self.message_editor.update(cx, |message_editor, cx| {
                 message_editor.edit(

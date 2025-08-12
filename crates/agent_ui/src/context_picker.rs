@@ -1,9 +1,9 @@
 mod completion_provider;
-mod fetch_context_picker;
+pub(crate) mod fetch_context_picker;
 pub(crate) mod file_context_picker;
-mod rules_context_picker;
-mod symbol_context_picker;
-mod thread_context_picker;
+pub(crate) mod rules_context_picker;
+pub(crate) mod symbol_context_picker;
+pub(crate) mod thread_context_picker;
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ use agent::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContextPickerEntry {
+pub(crate) enum ContextPickerEntry {
     Mode(ContextPickerMode),
     Action(ContextPickerAction),
 }
@@ -74,7 +74,7 @@ impl ContextPickerEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContextPickerMode {
+pub(crate) enum ContextPickerMode {
     File,
     Symbol,
     Fetch,
@@ -83,7 +83,7 @@ enum ContextPickerMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContextPickerAction {
+pub(crate) enum ContextPickerAction {
     AddSelections,
 }
 
@@ -585,7 +585,8 @@ impl Render for ContextPicker {
             })
     }
 }
-enum RecentEntry {
+
+pub(crate) enum RecentEntry {
     File {
         project_path: ProjectPath,
         path_prefix: Arc<str>,
@@ -593,7 +594,7 @@ enum RecentEntry {
     Thread(ThreadContextEntry),
 }
 
-fn available_context_picker_entries(
+pub(crate) fn available_context_picker_entries(
     prompt_store: &Option<Entity<PromptStore>>,
     thread_store: &Option<WeakEntity<ThreadStore>>,
     workspace: &Entity<Workspace>,
@@ -630,7 +631,7 @@ fn available_context_picker_entries(
     entries
 }
 
-fn recent_context_picker_entries(
+pub(crate) fn recent_context_picker_entries(
     context_store: Entity<ContextStore>,
     thread_store: Option<WeakEntity<ThreadStore>>,
     text_thread_store: Option<WeakEntity<TextThreadStore>>,
