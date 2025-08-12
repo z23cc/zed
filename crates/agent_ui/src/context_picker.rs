@@ -742,7 +742,7 @@ fn add_selections_as_context(
     })
 }
 
-fn selection_ranges(
+pub(crate) fn selection_ranges(
     workspace: &Entity<Workspace>,
     cx: &mut App,
 ) -> Vec<(Entity<Buffer>, Range<text::Anchor>)> {

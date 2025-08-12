@@ -3,16 +3,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use acp_thread::MentionUri;
-use agent::context_store::ContextStore;
+use acp_thread::{MentionUri, selection_name};
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
 use editor::display_map::CreaseId;
-use editor::{CompletionProvider, Editor, ExcerptId};
+use editor::{AnchorRangeExt, CompletionProvider, Editor, ExcerptId, ToOffset as _, ToPoint};
 use file_icons::FileIcons;
 use futures::future::try_join_all;
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{App, Entity, Task, WeakEntity};
+use itertools::Itertools as _;
 use language::{Buffer, CodeLabel, HighlightId};
 use lsp::CompletionContext;
 use parking_lot::Mutex;
@@ -21,14 +21,12 @@ use project::{
 };
 use prompt_store::PromptStore;
 use rope::Point;
-use text::{Anchor, ToPoint};
+use text::{Anchor, ToPoint as _};
 use ui::prelude::*;
-use util::ResultExt as _;
 use workspace::Workspace;
 
 use agent::{
-    Thread,
-    context::{AgentContextHandle, AgentContextKey, RULES_ICON},
+    context::RULES_ICON,
     thread_store::{TextThreadStore, ThreadStore},
 };
 
@@ -40,10 +38,9 @@ use crate::context_picker::thread_context_picker::{
     ThreadContextEntry, ThreadMatch, search_threads,
 };
 use crate::context_picker::{
-    ContextPickerEntry, ContextPickerMode, RecentEntry, available_context_picker_entries,
-    recent_context_picker_entries,
+    ContextPickerAction, ContextPickerEntry, ContextPickerMode, RecentEntry,
+    available_context_picker_entries, recent_context_picker_entries, selection_ranges,
 };
-use crate::message_editor::ContextCreasesAddon;
 
 #[derive(Default)]
 pub struct MentionSet {
@@ -86,10 +83,44 @@ impl MentionSet {
                         anyhow::Ok((crease_id, Mention { uri, content }))
                     })
                 }
-                _ => {
-                    // TODO
-                    unimplemented!()
+                MentionUri::Symbol {
+                    path, line_range, ..
                 }
+                | MentionUri::Selection {
+                    path, line_range, ..
+                } => {
+                    let crease_id = *crease_id;
+                    let uri = uri.clone();
+                    let path_buf = path.clone();
+                    let line_range = line_range.clone();
+
+                    let buffer_task = project.update(cx, |project, cx| {
+                        let path = project
+                            .find_project_path(&path_buf, cx)
+                            .context("Failed to find project path")?;
+                        anyhow::Ok(project.open_buffer(path, cx))
+                    });
+
+                    cx.spawn(async move |cx| {
+                        let buffer = buffer_task?.await?;
+                        let content = buffer.read_with(cx, |buffer, _cx| {
+                            buffer
+                                .text_for_range(
+                                    Point::new(line_range.start, 0)
+                                        ..Point::new(
+                                            line_range.end,
+                                            buffer.line_len(line_range.end),
+                                        ),
+                                )
+                                .collect()
+                        })?;
+
+                        anyhow::Ok((crease_id, Mention { uri, content }))
+                    })
+                }
+                MentionUri::Thread(_) => todo!(),
+                MentionUri::TextThread(path_buf) => todo!(),
+                MentionUri::Rule(_) => todo!(),
             })
             .collect::<Vec<_>>();
 
@@ -136,8 +167,8 @@ fn search(
     cancellation_flag: Arc<AtomicBool>,
     recent_entries: Vec<RecentEntry>,
     prompt_store: Option<Entity<PromptStore>>,
-    thread_store: Option<WeakEntity<ThreadStore>>,
-    text_thread_context_store: Option<WeakEntity<assistant_context::ContextStore>>,
+    thread_store: WeakEntity<ThreadStore>,
+    text_thread_context_store: WeakEntity<assistant_context::ContextStore>,
     workspace: Entity<Workspace>,
     cx: &mut App,
 ) -> Task<Vec<Match>> {
@@ -168,9 +199,8 @@ fn search(
 
         Some(ContextPickerMode::Thread) => {
             if let Some((thread_store, context_store)) = thread_store
-                .as_ref()
-                .and_then(|t| t.upgrade())
-                .zip(text_thread_context_store.as_ref().and_then(|t| t.upgrade()))
+                .upgrade()
+                .zip(text_thread_context_store.upgrade())
             {
                 let search_threads_task = search_threads(
                     query.clone(),
@@ -240,14 +270,19 @@ fn search(
                     .collect::<Vec<_>>();
 
                 matches.extend(
-                    available_context_picker_entries(&prompt_store, &thread_store, &workspace, cx)
-                        .into_iter()
-                        .map(|mode| {
-                            Match::Entry(EntryMatch {
-                                entry: mode,
-                                mat: None,
-                            })
-                        }),
+                    available_context_picker_entries(
+                        &prompt_store,
+                        &Some(thread_store.clone()),
+                        &workspace,
+                        cx,
+                    )
+                    .into_iter()
+                    .map(|mode| {
+                        Match::Entry(EntryMatch {
+                            entry: mode,
+                            mat: None,
+                        })
+                    }),
                 );
 
                 Task::ready(matches)
@@ -257,8 +292,12 @@ fn search(
                 let search_files_task =
                     search_files(query.clone(), cancellation_flag.clone(), &workspace, cx);
 
-                let entries =
-                    available_context_picker_entries(&prompt_store, &thread_store, &workspace, cx);
+                let entries = available_context_picker_entries(
+                    &prompt_store,
+                    &Some(thread_store.clone()),
+                    &workspace,
+                    cx,
+                );
                 let entry_candidates = entries
                     .iter()
                     .enumerate()
@@ -352,117 +391,101 @@ impl ContextPickerCompletionProvider {
                 confirm: Some(Arc::new(|_, _, _| true)),
             }),
             ContextPickerEntry::Action(action) => {
-                todo!()
-                // let (new_text, on_action) = match action {
-                //     ContextPickerAction::AddSelections => {
-                //         let selections = selection_ranges(workspace, cx);
+                let (new_text, on_action) = match action {
+                    ContextPickerAction::AddSelections => {
+                        let selections = selection_ranges(workspace, cx);
 
-                //         let selection_infos = selections
-                //             .iter()
-                //             .map(|(buffer, range)| {
-                //                 let full_path = buffer
-                //                     .read(cx)
-                //                     .file()
-                //                     .map(|file| file.full_path(cx))
-                //                     .unwrap_or_else(|| PathBuf::from("untitled"));
-                //                 let file_name = full_path
-                //                     .file_name()
-                //                     .unwrap_or_default()
-                //                     .to_string_lossy()
-                //                     .to_string();
-                //                 let line_range = range.to_point(&buffer.read(cx).snapshot());
+                        const PLACEHOLDER: &str = "selection ";
 
-                //                 let link = MentionLink::for_selection(
-                //                     &file_name,
-                //                     &full_path.to_string_lossy(),
-                //                     line_range.start.row as usize..line_range.end.row as usize,
-                //                 );
-                //                 (file_name, link, line_range)
-                //             })
-                //             .collect::<Vec<_>>();
+                        let new_text = std::iter::repeat(PLACEHOLDER)
+                            .take(selections.len())
+                            .chain(std::iter::once(""))
+                            .join(" ");
 
-                //         let new_text = format!(
-                //             "{} ",
-                //             selection_infos.iter().map(|(_, link, _)| link).join(" ")
-                //         );
+                        let callback = Arc::new({
+                            let mention_set = mention_set.clone();
+                            let selections = selections.clone();
+                            move |_, window: &mut Window, cx: &mut App| {
+                                let editor = editor.clone();
+                                let mention_set = mention_set.clone();
+                                let selections = selections.clone();
+                                window.defer(cx, move |window, cx| {
+                                    let mut current_offset = 0;
 
-                //         let callback = Arc::new({
-                //             let context_store = context_store.clone();
-                //             let selections = selections.clone();
-                //             let selection_infos = selection_infos.clone();
-                //             move |_, window: &mut Window, cx: &mut App| {
-                //                 context_store.update(cx, |context_store, cx| {
-                //                     for (buffer, range) in &selections {
-                //                         context_store.add_selection(
-                //                             buffer.clone(),
-                //                             range.clone(),
-                //                             cx,
-                //                         );
-                //                     }
-                //                 });
+                                    for (buffer, selection_range) in selections {
+                                        let snapshot =
+                                            editor.read(cx).buffer().read(cx).snapshot(cx);
+                                        let Some(start) = snapshot
+                                            .anchor_in_excerpt(excerpt_id, source_range.start)
+                                        else {
+                                            return;
+                                        };
 
-                //                 let editor = editor.clone();
-                //                 let selection_infos = selection_infos.clone();
-                //                 window.defer(cx, move |window, cx| {
-                //                     let mut current_offset = 0;
-                //                     for (file_name, link, line_range) in selection_infos.iter() {
-                //                         let snapshot =
-                //                             editor.read(cx).buffer().read(cx).snapshot(cx);
-                //                         let Some(start) = snapshot
-                //                             .anchor_in_excerpt(excerpt_id, source_range.start)
-                //                         else {
-                //                             return;
-                //                         };
+                                        let offset = start.to_offset(&snapshot) + current_offset;
+                                        let text_len = PLACEHOLDER.len() - 1;
 
-                //                         let offset = start.to_offset(&snapshot) + current_offset;
-                //                         let text_len = link.len();
+                                        let range = snapshot.anchor_after(offset)
+                                            ..snapshot.anchor_after(offset + text_len);
 
-                //                         let range = snapshot.anchor_after(offset)
-                //                             ..snapshot.anchor_after(offset + text_len);
+                                        let path = buffer
+                                            .read(cx)
+                                            .file()
+                                            .map_or(PathBuf::from("untitled"), |file| {
+                                                file.path().to_path_buf()
+                                            });
 
-                //                         let crease = super::crease_for_mention(
-                //                             format!(
-                //                                 "{} ({}-{})",
-                //                                 file_name,
-                //                                 line_range.start.row + 1,
-                //                                 line_range.end.row + 1
-                //                             )
-                //                             .into(),
-                //                             IconName::Reader.path().into(),
-                //                             range,
-                //                             editor.downgrade(),
-                //                         );
+                                        let point_range = range.to_point(&snapshot);
+                                        let line_range = point_range.start.row..point_range.end.row;
+                                        let crease = crate::context_picker::crease_for_mention(
+                                            selection_name(&path, &line_range).into(),
+                                            IconName::Reader.path().into(),
+                                            range,
+                                            editor.downgrade(),
+                                        );
 
-                //                         editor.update(cx, |editor, cx| {
-                //                             editor.insert_creases(vec![crease.clone()], cx);
-                //                             editor.fold_creases(vec![crease], false, window, cx);
-                //                         });
+                                        let [crease_id]: [_; 1] =
+                                            editor.update(cx, |editor, cx| {
+                                                let crease_ids =
+                                                    editor.insert_creases(vec![crease.clone()], cx);
+                                                editor.fold_creases(
+                                                    vec![crease],
+                                                    false,
+                                                    window,
+                                                    cx,
+                                                );
+                                                crease_ids.try_into().unwrap()
+                                            });
 
-                //                         current_offset += text_len + 1;
-                //                     }
-                //                 });
+                                        mention_set.lock().insert(
+                                            crease_id,
+                                            MentionUri::Selection { path, line_range },
+                                        );
 
-                //                 false
-                //             }
-                //         });
+                                        current_offset += text_len + 1;
+                                    }
+                                });
 
-                //         (new_text, callback)
-                //     }
-                // };
+                                false
+                            }
+                        });
 
-                // Some(Completion {
-                //     replace_range: source_range.clone(),
-                //     new_text,
-                //     label: CodeLabel::plain(action.label().to_string(), None),
-                //     icon_path: Some(action.icon().path().into()),
-                //     documentation: None,
-                //     source: project::CompletionSource::Custom,
-                //     insert_text_mode: None,
-                //     // This ensures that when a user accepts this completion, the
-                //     // completion menu will still be shown after "@category " is
-                //     // inserted
-                //     confirm: Some(on_action),
-                // })
+                        (new_text, callback)
+                    }
+                };
+
+                Some(Completion {
+                    replace_range: source_range.clone(),
+                    new_text,
+                    label: CodeLabel::plain(action.label().to_string(), None),
+                    icon_path: Some(action.icon().path().into()),
+                    documentation: None,
+                    source: project::CompletionSource::Custom,
+                    insert_text_mode: None,
+                    // This ensures that when a user accepts this completion, the
+                    // completion menu will still be shown after "@category " is
+                    // inserted
+                    confirm: Some(on_action),
+                })
             }
         }
     }
@@ -636,11 +659,12 @@ impl ContextPickerCompletionProvider {
 
         let comment_id = cx.theme().syntax().highlight_id("comment").map(HighlightId);
         let mut label = CodeLabel::plain(symbol.name.clone(), None);
-        label.push_str(" ", None);
-        label.push_str(&file_name, comment_id);
-        label.push_str(&format!(" L{}", symbol.range.start.0.row + 1), comment_id);
 
-        let uri = MentionUri::Symbol(full_path.into(), symbol.name.clone());
+        let uri = MentionUri::Symbol {
+            path: full_path.into(),
+            name: symbol.name.clone(),
+            line_range: symbol.range.start.0.row..symbol.range.end.0.row,
+        };
         let new_text = format!("{} ", uri.to_link());
         let new_text_len = new_text.len();
         Some(Completion {
@@ -741,20 +765,18 @@ impl CompletionProvider for ContextPickerCompletionProvider {
         };
 
         let recent_entries = recent_context_picker_entries(
-            thread_store.clone(),
-            text_thread_store.clone(),
+            Some(thread_store.clone()),
+            Some(text_thread_store.clone()),
             workspace.clone(),
             &exclude_paths,
             &exclude_threads,
             cx,
         );
 
-        let prompt_store = thread_store.as_ref().and_then(|thread_store| {
-            thread_store
-                .read_with(cx, |thread_store, _cx| thread_store.prompt_store().clone())
-                .ok()
-                .flatten()
-        });
+        let prompt_store = thread_store
+            .read_with(cx, |thread_store, _cx| thread_store.prompt_store().clone())
+            .ok()
+            .flatten();
 
         let search_task = search(
             mode,

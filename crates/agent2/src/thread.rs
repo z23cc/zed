@@ -26,8 +26,8 @@ use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Serialize};
 use settings::{Settings, update_settings_file};
 use smol::stream::StreamExt;
-use std::fmt::Write;
 use std::{cell::RefCell, collections::BTreeMap, path::Path, rc::Rc, sync::Arc};
+use std::{fmt::Write, ops::Range};
 use util::{ResultExt, markdown::MarkdownCodeBlock};
 
 #[derive(Debug, Clone)]
@@ -1182,13 +1182,29 @@ impl AgentMessage {
                 }
                 MessageContent::Mention { uri, content } => {
                     match uri {
-                        MentionUri::File(path) | MentionUri::Symbol(path, _) => {
+                        MentionUri::File(path) => {
                             write!(
                                 &mut symbol_context,
                                 "\n{}",
                                 MarkdownCodeBlock {
-                                    tag: &codeblock_tag(&path),
+                                    tag: &codeblock_tag(&path, None),
                                     text: &content.to_string(),
+                                }
+                            )
+                            .ok();
+                        }
+                        MentionUri::Symbol {
+                            path, line_range, ..
+                        }
+                        | MentionUri::Selection {
+                            path, line_range, ..
+                        } => {
+                            write!(
+                                &mut rules_context,
+                                "\n{}",
+                                MarkdownCodeBlock {
+                                    tag: &codeblock_tag(&path, Some(line_range)),
+                                    text: &content
                                 }
                             )
                             .ok();
@@ -1263,7 +1279,7 @@ impl AgentMessage {
     }
 }
 
-fn codeblock_tag(full_path: &Path) -> String {
+fn codeblock_tag(full_path: &Path, line_range: Option<&Range<u32>>) -> String {
     let mut result = String::new();
 
     if let Some(extension) = full_path.extension().and_then(|ext| ext.to_str()) {
@@ -1271,6 +1287,14 @@ fn codeblock_tag(full_path: &Path) -> String {
     }
 
     let _ = write!(result, "{}", full_path.display());
+
+    if let Some(range) = line_range {
+        if range.start == range.end {
+            let _ = write!(result, ":{}", range.start + 1);
+        } else {
+            let _ = write!(result, ":{}-{}", range.start + 1, range.end + 1);
+        }
+    }
 
     result
 }
