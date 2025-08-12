@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use acp_thread::{MentionUri, selection_name};
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use collections::{HashMap, HashSet};
 use editor::display_map::CreaseId;
-use editor::{AnchorRangeExt, CompletionProvider, Editor, ExcerptId, ToOffset as _, ToPoint};
+use editor::{CompletionProvider, Editor, ExcerptId, ToOffset as _};
 use file_icons::FileIcons;
 use futures::future::try_join_all;
 use fuzzy::{StringMatch, StringMatchCandidate};
@@ -21,7 +21,7 @@ use project::{
 };
 use prompt_store::PromptStore;
 use rope::Point;
-use text::{Anchor, ToPoint as _};
+use text::{Anchor, OffsetRangeExt as _, ToPoint as _};
 use ui::prelude::*;
 use workspace::Workspace;
 
@@ -59,14 +59,16 @@ impl MentionSet {
     pub fn contents(
         &self,
         project: Entity<Project>,
+        thread_store: Entity<ThreadStore>,
+        text_thread_store: Entity<TextThreadStore>,
+        window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<HashMap<CreaseId, Mention>>> {
         let contents = self
             .uri_by_crease_id
             .iter()
-            .map(|(crease_id, uri)| match uri {
+            .map(|(&crease_id, uri)| match uri {
                 MentionUri::File(path) => {
-                    let crease_id = *crease_id;
                     let uri = uri.clone();
                     let path = path.to_path_buf();
                     let buffer_task = project.update(cx, |project, cx| {
@@ -89,7 +91,6 @@ impl MentionSet {
                 | MentionUri::Selection {
                     path, line_range, ..
                 } => {
-                    let crease_id = *crease_id;
                     let uri = uri.clone();
                     let path_buf = path.clone();
                     let line_range = line_range.clone();
@@ -118,9 +119,44 @@ impl MentionSet {
                         anyhow::Ok((crease_id, Mention { uri, content }))
                     })
                 }
-                MentionUri::Thread(_) => todo!(),
-                MentionUri::TextThread(path_buf) => todo!(),
-                MentionUri::Rule(_) => todo!(),
+                MentionUri::Thread { id: thread_id, .. } => {
+                    let open_task = thread_store.update(cx, |thread_store, cx| {
+                        thread_store.open_thread(&thread_id, window, cx)
+                    });
+
+                    let uri = uri.clone();
+                    cx.spawn(async move |cx| {
+                        let thread = open_task.await?;
+                        let content = thread.read_with(cx, |thread, _cx| {
+                            thread.latest_detailed_summary_or_text().to_string()
+                        })?;
+
+                        anyhow::Ok((crease_id, Mention { uri, content }))
+                    })
+                }
+                MentionUri::TextThread { path, .. } => {
+                    let context = text_thread_store.update(cx, |text_thread_store, cx| {
+                        text_thread_store.open_local_context(path.as_path().into(), cx)
+                    });
+                    let uri = uri.clone();
+                    cx.spawn(async move |cx| {
+                        let context = context.await?;
+                        let xml = context.update(cx, |context, cx| context.to_xml(cx))?;
+                        anyhow::Ok((crease_id, Mention { uri, content: xml }))
+                    })
+                }
+                MentionUri::Rule { id: prompt_id, .. } => {
+                    let Some(prompt_store) = thread_store.read(cx).prompt_store().clone() else {
+                        return Task::ready(Err(anyhow!("missing prompt store")));
+                    };
+                    let text_task = prompt_store.read(cx).load(prompt_id.clone(), cx);
+                    let uri = uri.clone();
+                    cx.spawn(async move |_| {
+                        // TODO: report load errors instead of just logging
+                        let text = text_task.await?;
+                        anyhow::Ok((crease_id, Mention { uri, content: text }))
+                    })
+                }
             })
             .collect::<Vec<_>>();
 
@@ -434,7 +470,12 @@ impl ContextPickerCompletionProvider {
                                                 file.path().to_path_buf()
                                             });
 
-                                        let point_range = range.to_point(&snapshot);
+                                        let point_range = snapshot
+                                            .as_singleton()
+                                            .map(|(_, _, snapshot)| {
+                                                selection_range.to_point(&snapshot)
+                                            })
+                                            .unwrap_or_default();
                                         let line_range = point_range.start.row..point_range.end.row;
                                         let crease = crate::context_picker::crease_for_mention(
                                             selection_name(&path, &line_range).into(),
@@ -505,8 +546,14 @@ impl ContextPickerCompletionProvider {
         };
 
         let uri = match &thread_entry {
-            ThreadContextEntry::Thread { id, .. } => MentionUri::Thread(id.to_string()),
-            ThreadContextEntry::Context { path, .. } => MentionUri::TextThread(path.to_path_buf()),
+            ThreadContextEntry::Thread { id, title } => MentionUri::Thread {
+                id: id.clone(),
+                name: title.to_string(),
+            },
+            ThreadContextEntry::Context { path, title } => MentionUri::TextThread {
+                path: path.to_path_buf(),
+                name: title.to_string(),
+            },
         };
         let new_text = format!("{} ", uri.to_link());
 
@@ -533,26 +580,29 @@ impl ContextPickerCompletionProvider {
     }
 
     fn completion_for_rules(
-        rules: RulesContextEntry,
+        rule: RulesContextEntry,
         excerpt_id: ExcerptId,
         source_range: Range<Anchor>,
         editor: Entity<Editor>,
         mention_set: Arc<Mutex<MentionSet>>,
     ) -> Completion {
-        let uri = MentionUri::Rule(rules.prompt_id.0.to_string());
+        let uri = MentionUri::Rule {
+            id: rule.prompt_id.into(),
+            name: rule.title.to_string(),
+        };
         let new_text = format!("{} ", uri.to_link());
         let new_text_len = new_text.len();
         Completion {
             replace_range: source_range.clone(),
             new_text,
-            label: CodeLabel::plain(rules.title.to_string(), None),
+            label: CodeLabel::plain(rule.title.to_string(), None),
             documentation: None,
             insert_text_mode: None,
             source: project::CompletionSource::Custom,
             icon_path: Some(RULES_ICON.path().into()),
             confirm: Some(confirm_completion_callback(
                 RULES_ICON.path().into(),
-                rules.title.clone(),
+                rule.title.clone(),
                 excerpt_id,
                 source_range.start,
                 new_text_len - 1,
@@ -657,8 +707,7 @@ impl ContextPickerCompletionProvider {
             file_name.to_string()
         };
 
-        let comment_id = cx.theme().syntax().highlight_id("comment").map(HighlightId);
-        let mut label = CodeLabel::plain(symbol.name.clone(), None);
+        let label = CodeLabel::plain(symbol.name.clone(), None);
 
         let uri = MentionUri::Symbol {
             path: full_path.into(),
@@ -754,8 +803,8 @@ impl CompletionProvider for ContextPickerCompletionProvider {
                     MentionUri::File(path) => {
                         excluded_paths.insert(path.clone());
                     }
-                    MentionUri::Thread(thread) => {
-                        excluded_threads.insert(thread.as_str().into());
+                    MentionUri::Thread { id, .. } => {
+                        excluded_threads.insert(id.clone());
                     }
                     _ => {}
                 }

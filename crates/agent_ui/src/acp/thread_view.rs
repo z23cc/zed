@@ -59,6 +59,8 @@ pub struct AcpThreadView {
     agent: Rc<dyn AgentServer>,
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
+    thread_store: WeakEntity<ThreadStore>,
+    text_thread_store: WeakEntity<TextThreadStore>,
     thread_state: ThreadState,
     diff_editors: HashMap<EntityId, Entity<Editor>>,
     terminal_views: HashMap<EntityId, Entity<TerminalView>>,
@@ -189,6 +191,8 @@ impl AcpThreadView {
             agent: agent.clone(),
             workspace: workspace.clone(),
             project: project.clone(),
+            thread_store,
+            text_thread_store,
             thread_state: Self::initial_state(agent, workspace, project, window, cx),
             message_editor,
             message_set_from_history: None,
@@ -383,7 +387,17 @@ impl AcpThreadView {
         let mut chunks: Vec<acp::ContentBlock> = Vec::new();
         let project = self.project.clone();
 
-        let contents = self.mention_set.lock().contents(project, cx);
+        let Some(thread_store) = self.thread_store.upgrade() else {
+            return;
+        };
+        let Some(text_thread_store) = self.text_thread_store.upgrade() else {
+            return;
+        };
+
+        let contents =
+            self.mention_set
+                .lock()
+                .contents(project, thread_store, text_thread_store, window, cx);
 
         cx.spawn_in(window, async move |this, cx| {
             let contents = match contents.await {

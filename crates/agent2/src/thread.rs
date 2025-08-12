@@ -1209,13 +1209,13 @@ impl AgentMessage {
                             )
                             .ok();
                         }
-                        MentionUri::Thread(_session_id) => {
+                        MentionUri::Thread { .. } => {
                             write!(&mut thread_context, "\n{}\n", content).ok();
                         }
-                        MentionUri::TextThread(_session_id) => {
+                        MentionUri::TextThread { .. } => {
                             write!(&mut thread_context, "\n{}\n", content).ok();
                         }
-                        MentionUri::Rule(_user_prompt_id) => {
+                        MentionUri::Rule { .. } => {
                             write!(
                                 &mut rules_context,
                                 "\n{}",

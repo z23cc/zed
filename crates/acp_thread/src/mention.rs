@@ -1,8 +1,11 @@
+use agent::ThreadId;
 use anyhow::{Context as _, Result, bail};
+use prompt_store::{PromptId, UserPromptId};
 use std::{
     ops::Range,
     path::{Path, PathBuf},
 };
+use url::Url;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MentionUri {
@@ -12,9 +15,18 @@ pub enum MentionUri {
         name: String,
         line_range: Range<u32>,
     },
-    Thread(String),
-    TextThread(PathBuf),
-    Rule(String),
+    Thread {
+        id: ThreadId,
+        name: String,
+    },
+    TextThread {
+        path: PathBuf,
+        name: String,
+    },
+    Rule {
+        id: PromptId,
+        name: String,
+    },
     Selection {
         path: PathBuf,
         line_range: Range<u32>,
@@ -44,33 +56,42 @@ impl MentionUri {
                             .context("Parsing line range end")?
                             .checked_sub(1)
                             .context("Line numbers should be 1-based")?;
-                    let pairs = url.query_pairs().collect::<Vec<_>>();
-                    match pairs.as_slice() {
-                        [] => Ok(Self::Selection {
+                    if let Some(name) = single_query_param(&url, "symbol")? {
+                        Ok(Self::Symbol {
+                            name,
                             path: path.into(),
                             line_range,
-                        }),
-                        [(k, v)] => {
-                            if k != "symbol" {
-                                bail!("invalid query parameter")
-                            }
-                            Ok(Self::Symbol {
-                                name: v.to_string(),
-                                path: path.into(),
-                                line_range,
-                            })
-                        }
-                        _ => bail!("too many query pairs"),
+                        })
+                    } else {
+                        Ok(Self::Selection {
+                            path: path.into(),
+                            line_range,
+                        })
                     }
                 } else {
                     Ok(Self::File(path.into()))
                 }
             }
             "zed" => {
-                if let Some(thread) = path.strip_prefix("/agent/thread/") {
-                    Ok(Self::Thread(thread.into()))
-                } else if let Some(rule) = path.strip_prefix("/agent/rule/") {
-                    Ok(Self::Rule(rule.into()))
+                if let Some(thread_id) = path.strip_prefix("/agent/thread/") {
+                    let name = single_query_param(&url, "name")?.context("Missing thread name")?;
+                    Ok(Self::Thread {
+                        id: thread_id.into(),
+                        name,
+                    })
+                } else if let Some(path) = path.strip_prefix("/agent/text-thread/") {
+                    let name = single_query_param(&url, "name")?.context("Missing thread name")?;
+                    Ok(Self::TextThread {
+                        path: path.into(),
+                        name,
+                    })
+                } else if let Some(rule_id) = path.strip_prefix("/agent/rule/") {
+                    let name = single_query_param(&url, "name")?.context("Missing rule name")?;
+                    let rule_id = UserPromptId(rule_id.parse()?);
+                    Ok(Self::Rule {
+                        id: rule_id.into(),
+                        name,
+                    })
                 } else {
                     bail!("invalid zed url: {:?}", input);
                 }
@@ -79,7 +100,7 @@ impl MentionUri {
         }
     }
 
-    pub fn name(&self) -> String {
+    fn name(&self) -> String {
         match self {
             MentionUri::File(path) => path
                 .file_name()
@@ -87,9 +108,10 @@ impl MentionUri {
                 .to_string_lossy()
                 .into_owned(),
             MentionUri::Symbol { name, .. } => name.clone(),
-            MentionUri::Thread(thread) => thread.to_string(),
-            MentionUri::TextThread(thread) => thread.display().to_string(),
-            MentionUri::Rule(rule) => rule.clone(),
+            // todo! better names
+            MentionUri::Thread { name, .. } => name.clone(),
+            MentionUri::TextThread { name, .. } => name.clone(),
+            MentionUri::Rule { name, .. } => name.clone(),
             MentionUri::Selection {
                 path, line_range, ..
             } => selection_name(path, line_range),
@@ -129,16 +151,31 @@ impl MentionUri {
                     line_range.end + 1,
                 )
             }
-            MentionUri::Thread(thread) => {
-                format!("zed:///agent/thread/{}", thread)
+            MentionUri::Thread { name, id } => {
+                format!("zed:///agent/thread/{id}?name={name}")
             }
-            MentionUri::TextThread(path) => {
-                format!("zed:///agent/text-thread/{}", path.display())
+            MentionUri::TextThread { path, name } => {
+                format!("zed:///agent/text-thread/{}?name={name}", path.display())
             }
-            MentionUri::Rule(rule) => {
-                format!("zed:///agent/rule/{}", rule)
+            MentionUri::Rule { name, id } => {
+                format!("zed:///agent/rule/{id}?name={name}")
             }
         }
+    }
+}
+
+fn single_query_param(url: &Url, name: &'static str) -> Result<Option<String>> {
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    match pairs.as_slice() {
+        [] => Ok(None),
+        [(k, v)] => {
+            if k != name {
+                bail!("invalid query parameter")
+            }
+
+            Ok(Some(v.to_string()))
+        }
+        _ => bail!("too many query pairs"),
     }
 }
 
@@ -203,10 +240,16 @@ mod tests {
 
     #[test]
     fn test_parse_thread_uri() {
-        let thread_uri = "zed:///agent/thread/session123";
+        let thread_uri = "zed:///agent/thread/session123?name=Thread%20name";
         let parsed = MentionUri::parse(thread_uri).unwrap();
         match &parsed {
-            MentionUri::Thread(thread_id) => assert_eq!(thread_id, "session123"),
+            MentionUri::Thread {
+                id: thread_id,
+                name,
+            } => {
+                assert_eq!(thread_id.to_string(), "session123");
+                assert_eq!(name, "Thread name");
+            }
             _ => panic!("Expected Thread variant"),
         }
         assert_eq!(parsed.to_uri(), thread_uri);
@@ -214,10 +257,13 @@ mod tests {
 
     #[test]
     fn test_parse_rule_uri() {
-        let rule_uri = "zed:///agent/rule/my_rule";
+        let rule_uri = "zed:///agent/rule/d8694ff2-90d5-4b6f-be33-33c1763acd52?name=Some%20rule";
         let parsed = MentionUri::parse(rule_uri).unwrap();
         match &parsed {
-            MentionUri::Rule(rule) => assert_eq!(rule, "my_rule"),
+            MentionUri::Rule { id, name } => {
+                assert_eq!(id.to_string(), "d8694ff2-90d5-4b6f-be33-33c1763acd52");
+                assert_eq!(name, "Some rule");
+            }
             _ => panic!("Expected Rule variant"),
         }
         assert_eq!(parsed.to_uri(), rule_uri);
