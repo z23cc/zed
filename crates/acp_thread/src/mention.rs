@@ -1,4 +1,3 @@
-use agent_client_protocol as acp;
 use anyhow::{Result, bail};
 use std::path::PathBuf;
 
@@ -6,7 +5,8 @@ use std::path::PathBuf;
 pub enum MentionUri {
     File(PathBuf),
     Symbol(PathBuf, String),
-    Thread(acp::SessionId),
+    Thread(String),
+    TextThread(PathBuf),
     Rule(String),
 }
 
@@ -24,7 +24,7 @@ impl MentionUri {
             }
             "zed" => {
                 if let Some(thread) = path.strip_prefix("/agent/thread/") {
-                    Ok(Self::Thread(acp::SessionId(thread.into())))
+                    Ok(Self::Thread(thread.into()))
                 } else if let Some(rule) = path.strip_prefix("/agent/rule/") {
                     Ok(Self::Rule(rule.into()))
                 } else {
@@ -40,6 +40,7 @@ impl MentionUri {
             MentionUri::File(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
             MentionUri::Symbol(_path, name) => name.clone(),
             MentionUri::Thread(thread) => thread.to_string(),
+            MentionUri::TextThread(thread) => thread.display().to_string(),
             MentionUri::Rule(rule) => rule.clone(),
         }
     }
@@ -60,7 +61,10 @@ impl MentionUri {
                 format!("file://{}#{}", path.display(), name)
             }
             MentionUri::Thread(thread) => {
-                format!("zed:///agent/thread/{}", thread.0)
+                format!("zed:///agent/thread/{}", thread)
+            }
+            MentionUri::TextThread(path) => {
+                format!("zed:///agent/text-thread/{}", path.display())
             }
             MentionUri::Rule(rule) => {
                 format!("zed:///agent/rule/{}", rule)
@@ -100,7 +104,7 @@ mod tests {
         let thread_uri = "zed:///agent/thread/session123";
         let parsed = MentionUri::parse(thread_uri).unwrap();
         match &parsed {
-            MentionUri::Thread(session_id) => assert_eq!(session_id.0.as_ref(), "session123"),
+            MentionUri::Thread(thread_id) => assert_eq!(thread_id, "session123"),
             _ => panic!("Expected Thread variant"),
         }
         assert_eq!(parsed.to_uri(), thread_uri);

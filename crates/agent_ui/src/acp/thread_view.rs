@@ -4,6 +4,7 @@ use acp_thread::{
 };
 use acp_thread::{AgentConnection, Plan};
 use action_log::ActionLog;
+use agent::{TextThreadStore, ThreadStore};
 use agent_client_protocol as acp;
 use agent_servers::AgentServer;
 use agent_settings::{AgentSettings, NotifyWhenAgentWaiting};
@@ -104,6 +105,8 @@ impl AcpThreadView {
         agent: Rc<dyn AgentServer>,
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
+        thread_store: WeakEntity<ThreadStore>,
+        text_thread_store: WeaksEntity<TextThreadStore>,
         message_history: Rc<RefCell<MessageHistory<Vec<acp::ContentBlock>>>>,
         min_lines: usize,
         max_lines: Option<usize>,
@@ -141,11 +144,9 @@ impl AcpThreadView {
             editor.set_completion_provider(Some(Rc::new(ContextPickerCompletionProvider::new(
                 mention_set.clone(),
                 workspace.clone(),
-                // todo! provide thread stores
-                None,
-                None,
+                thread_store.clone(),
+                text_thread_store.clone(),
                 cx.weak_entity(),
-                // None,
             ))));
             editor.set_context_menu_options(ContextMenuOptions {
                 min_entries_visible: 12,
@@ -3579,6 +3580,8 @@ mod tests {
                     Rc::new(agent),
                     workspace.downgrade(),
                     project,
+                    WeakEntity::new_invalid(),
+                    WeakEntity::new_invalid(),
                     Rc::new(RefCell::new(MessageHistory::default())),
                     1,
                     None,

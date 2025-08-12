@@ -306,8 +306,8 @@ fn search(
 pub struct ContextPickerCompletionProvider {
     mention_set: Arc<Mutex<MentionSet>>,
     workspace: WeakEntity<Workspace>,
-    thread_store: Option<WeakEntity<ThreadStore>>,
-    text_thread_store: Option<WeakEntity<TextThreadStore>>,
+    thread_store: WeakEntity<ThreadStore>,
+    text_thread_store: WeakEntity<TextThreadStore>,
     editor: WeakEntity<Editor>,
 }
 
@@ -315,8 +315,8 @@ impl ContextPickerCompletionProvider {
     pub fn new(
         mention_set: Arc<Mutex<MentionSet>>,
         workspace: WeakEntity<Workspace>,
-        thread_store: Option<WeakEntity<ThreadStore>>,
-        text_thread_store: Option<WeakEntity<TextThreadStore>>,
+        thread_store: WeakEntity<ThreadStore>,
+        text_thread_store: WeakEntity<TextThreadStore>,
         editor: WeakEntity<Editor>,
     ) -> Self {
         Self {
@@ -474,77 +474,39 @@ impl ContextPickerCompletionProvider {
         recent: bool,
         editor: Entity<Editor>,
         mention_set: Arc<Mutex<MentionSet>>,
-        thread_store: Entity<ThreadStore>,
-        text_thread_store: Entity<TextThreadStore>,
     ) -> Completion {
-        todo!();
-        // let icon_for_completion = if recent {
-        //     IconName::HistoryRerun
-        // } else {
-        //     IconName::Thread
-        // };
+        let icon_for_completion = if recent {
+            IconName::HistoryRerun
+        } else {
+            IconName::Thread
+        };
 
-        // let new_text = format!("{} ", MentionUri::Thread(thread_id));
+        let uri = match &thread_entry {
+            ThreadContextEntry::Thread { id, .. } => MentionUri::Thread(id.to_string()),
+            ThreadContextEntry::Context { path, .. } => MentionUri::TextThread(path.to_path_buf()),
+        };
+        let new_text = format!("{} ", uri.to_link());
 
-        // let new_text_len = new_text.len();
-        // Completion {
-        //     replace_range: source_range.clone(),
-        //     new_text,
-        //     label: CodeLabel::plain(thread_entry.title().to_string(), None),
-        //     documentation: None,
-        //     insert_text_mode: None,
-        //     source: project::CompletionSource::Custom,
-        //     icon_path: Some(icon_for_completion.path().into()),
-        //     confirm: Some(confirm_completion_callback(
-        //         IconName::Thread.path().into(),
-        //         thread_entry.title().clone(),
-        //         excerpt_id,
-        //         source_range.start,
-        //         new_text_len - 1,
-        //         editor.clone(),
-        //         context_store.clone(),
-        //         move |window, cx| match &thread_entry {
-        //             ThreadContextEntry::Thread { id, .. } => {
-        //                 let thread_id = id.clone();
-        //                 let context_store = context_store.clone();
-        //                 let thread_store = thread_store.clone();
-        //                 window.spawn::<_, Option<_>>(cx, async move |cx| {
-        //                     let thread: Entity<Thread> = thread_store
-        //                         .update_in(cx, |thread_store, window, cx| {
-        //                             thread_store.open_thread(&thread_id, window, cx)
-        //                         })
-        //                         .ok()?
-        //                         .await
-        //                         .log_err()?;
-        //                     let context = context_store
-        //                         .update(cx, |context_store, cx| {
-        //                             context_store.add_thread(thread, false, cx)
-        //                         })
-        //                         .ok()??;
-        //                     Some(context)
-        //                 })
-        //             }
-        //             ThreadContextEntry::Context { path, .. } => {
-        //                 let path = path.clone();
-        //                 let context_store = context_store.clone();
-        //                 let text_thread_store = text_thread_store.clone();
-        //                 cx.spawn::<_, Option<_>>(async move |cx| {
-        //                     let thread = text_thread_store
-        //                         .update(cx, |store, cx| store.open_local_context(path, cx))
-        //                         .ok()?
-        //                         .await
-        //                         .log_err()?;
-        //                     let context = context_store
-        //                         .update(cx, |context_store, cx| {
-        //                             context_store.add_text_thread(thread, false, cx)
-        //                         })
-        //                         .ok()??;
-        //                     Some(context)
-        //                 })
-        //             }
-        //         },
-        //     )),
-        // }
+        let new_text_len = new_text.len();
+        Completion {
+            replace_range: source_range.clone(),
+            new_text,
+            label: CodeLabel::plain(thread_entry.title().to_string(), None),
+            documentation: None,
+            insert_text_mode: None,
+            source: project::CompletionSource::Custom,
+            icon_path: Some(icon_for_completion.path().into()),
+            confirm: Some(confirm_completion_callback(
+                IconName::Thread.path().into(),
+                thread_entry.title().clone(),
+                excerpt_id,
+                source_range.start,
+                new_text_len - 1,
+                editor.clone(),
+                mention_set,
+                uri,
+            )),
+        }
     }
 
     fn completion_for_rules(
@@ -555,7 +517,7 @@ impl ContextPickerCompletionProvider {
         mention_set: Arc<Mutex<MentionSet>>,
     ) -> Completion {
         let uri = MentionUri::Rule(rules.prompt_id.0.to_string());
-        let new_text = uri.to_link();
+        let new_text = format!("{} ", uri.to_link());
         let new_text_len = new_text.len();
         Completion {
             replace_range: source_range.clone(),
@@ -769,7 +731,7 @@ impl CompletionProvider for ContextPickerCompletionProvider {
                         excluded_paths.insert(path.clone());
                     }
                     MentionUri::Thread(thread) => {
-                        excluded_threads.insert(thread.0.as_ref().into());
+                        excluded_threads.insert(thread.as_str().into());
                     }
                     _ => {}
                 }
@@ -850,21 +812,14 @@ impl CompletionProvider for ContextPickerCompletionProvider {
 
                         Match::Thread(ThreadMatch {
                             thread, is_recent, ..
-                        }) => {
-                            let thread_store = thread_store.as_ref().and_then(|t| t.upgrade())?;
-                            let text_thread_store =
-                                text_thread_store.as_ref().and_then(|t| t.upgrade())?;
-                            Some(Self::completion_for_thread(
-                                thread,
-                                excerpt_id,
-                                source_range.clone(),
-                                is_recent,
-                                editor.clone(),
-                                mention_set.clone(),
-                                thread_store,
-                                text_thread_store,
-                            ))
-                        }
+                        }) => Some(Self::completion_for_thread(
+                            thread,
+                            excerpt_id,
+                            source_range.clone(),
+                            is_recent,
+                            editor.clone(),
+                            mention_set.clone(),
+                        )),
 
                         Match::Rules(user_rules) => Some(Self::completion_for_rules(
                             user_rules,

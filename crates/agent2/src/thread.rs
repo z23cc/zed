@@ -1196,6 +1196,9 @@ impl AgentMessage {
                         MentionUri::Thread(_session_id) => {
                             write!(&mut thread_context, "\n{}\n", content).ok();
                         }
+                        MentionUri::TextThread(_session_id) => {
+                            write!(&mut thread_context, "\n{}\n", content).ok();
+                        }
                         MentionUri::Rule(_user_prompt_id) => {
                             write!(
                                 &mut rules_context,
