@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -25,17 +25,16 @@ use crate::context_picker::file_context_picker::{extract_file_name_and_directory
 
 #[derive(Default)]
 pub struct MentionSet {
-    paths_by_crease_id: HashMap<CreaseId, MentionUri>,
+    uri_by_crease_id: HashMap<CreaseId, MentionUri>,
 }
 
 impl MentionSet {
-    pub fn insert(&mut self, crease_id: CreaseId, path: PathBuf) {
-        self.paths_by_crease_id
-            .insert(crease_id, MentionUri::File(path));
+    pub fn insert(&mut self, crease_id: CreaseId, uri: MentionUri) {
+        self.uri_by_crease_id.insert(crease_id, uri);
     }
 
     pub fn drain(&mut self) -> impl Iterator<Item = CreaseId> {
-        self.paths_by_crease_id.drain().map(|(id, _)| id)
+        self.uri_by_crease_id.drain().map(|(id, _)| id)
     }
 
     pub fn contents(
@@ -44,7 +43,7 @@ impl MentionSet {
         cx: &mut App,
     ) -> Task<Result<HashMap<CreaseId, Mention>>> {
         let contents = self
-            .paths_by_crease_id
+            .uri_by_crease_id
             .iter()
             .map(|(crease_id, uri)| match uri {
                 MentionUri::File(path) => {
@@ -328,7 +327,7 @@ fn confirm_completion_callback(
             };
 
             if let Some(crease_id) = crease_id {
-                mention_set.lock().insert(crease_id, path);
+                mention_set.lock().insert(crease_id, MentionUri::File(path));
             }
         });
         false

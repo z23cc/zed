@@ -640,7 +640,9 @@ impl AcpThreadView {
                 );
 
                 if let Some(crease_id) = crease_id {
-                    mention_set.lock().insert(crease_id, project_path);
+                    mention_set
+                        .lock()
+                        .insert(crease_id, MentionUri::File(project_path));
                 }
             }
         }
