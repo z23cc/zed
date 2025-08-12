@@ -145,7 +145,7 @@ impl AcpThreadView {
                 None,
                 None,
                 cx.weak_entity(),
-                None,
+                // None,
             ))));
             editor.set_context_menu_options(ContextMenuOptions {
                 min_entries_visible: 12,

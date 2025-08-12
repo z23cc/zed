@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 use acp_thread::MentionUri;
 use agent::context_store::ContextStore;
 use anyhow::{Context as _, Result};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::display_map::CreaseId;
 use editor::{CompletionProvider, Editor, ExcerptId};
 use file_icons::FileIcons;
@@ -309,7 +309,6 @@ pub struct ContextPickerCompletionProvider {
     thread_store: Option<WeakEntity<ThreadStore>>,
     text_thread_store: Option<WeakEntity<TextThreadStore>>,
     editor: WeakEntity<Editor>,
-    excluded_buffer: Option<WeakEntity<Buffer>>,
 }
 
 impl ContextPickerCompletionProvider {
@@ -319,7 +318,6 @@ impl ContextPickerCompletionProvider {
         thread_store: Option<WeakEntity<ThreadStore>>,
         text_thread_store: Option<WeakEntity<TextThreadStore>>,
         editor: WeakEntity<Editor>,
-        exclude_buffer: Option<WeakEntity<Buffer>>,
     ) -> Self {
         Self {
             mention_set,
@@ -327,7 +325,6 @@ impl ContextPickerCompletionProvider {
             thread_store,
             text_thread_store,
             editor,
-            excluded_buffer: exclude_buffer,
         }
     }
 
@@ -772,21 +769,35 @@ impl CompletionProvider for ContextPickerCompletionProvider {
         let MentionCompletion { mode, argument, .. } = state;
         let query = argument.unwrap_or_else(|| "".to_string());
 
-        let excluded_path = self
-            .excluded_buffer
-            .as_ref()
-            .and_then(WeakEntity::upgrade)
-            .and_then(|b| b.read(cx).file())
-            .map(|file| ProjectPath::from_file(file.as_ref(), cx));
+        let (exclude_paths, exclude_threads) = {
+            let mention_set = self.mention_set.lock();
 
-        // let recent_entries = recent_context_picker_entries(
-        //     context_store.clone(),
-        //     thread_store.clone(),
-        //     text_thread_store.clone(),
-        //     workspace.clone(),
-        //     excluded_path.clone(),
-        //     cx,
-        // );
+            let mut excluded_paths = HashSet::default();
+            let mut excluded_threads = HashSet::default();
+
+            for uri in mention_set.uri_by_crease_id.values() {
+                match uri {
+                    MentionUri::File(path) => {
+                        excluded_paths.insert(path.clone());
+                    }
+                    MentionUri::Thread(thread) => {
+                        excluded_threads.insert(thread.0.as_ref().into());
+                    }
+                    _ => {}
+                }
+            }
+
+            (excluded_paths, excluded_threads)
+        };
+
+        let recent_entries = recent_context_picker_entries(
+            thread_store.clone(),
+            text_thread_store.clone(),
+            workspace.clone(),
+            &exclude_paths,
+            &exclude_threads,
+            cx,
+        );
 
         let prompt_store = thread_store.as_ref().and_then(|thread_store| {
             thread_store
@@ -799,9 +810,7 @@ impl CompletionProvider for ContextPickerCompletionProvider {
             mode,
             query,
             Arc::<AtomicBool>::default(),
-            // todo!
-            // recent_entries,
-            vec![],
+            recent_entries,
             prompt_store,
             thread_store.clone(),
             text_thread_store.clone(),
@@ -826,10 +835,6 @@ impl CompletionProvider for ContextPickerCompletionProvider {
                                 worktree_id: WorktreeId::from_usize(mat.worktree_id),
                                 path: mat.path.clone(),
                             };
-
-                            if excluded_path.as_ref() == Some(&project_path) {
-                                return None;
-                            }
 
                             Self::completion_for_path(
                                 project_path,
