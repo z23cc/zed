@@ -2,6 +2,7 @@ use agent::ThreadId;
 use anyhow::{Context as _, Result, bail};
 use prompt_store::{PromptId, UserPromptId};
 use std::{
+    fmt,
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -108,7 +109,6 @@ impl MentionUri {
                 .to_string_lossy()
                 .into_owned(),
             MentionUri::Symbol { name, .. } => name.clone(),
-            // todo! better names
             MentionUri::Thread { name, .. } => name.clone(),
             MentionUri::TextThread { name, .. } => name.clone(),
             MentionUri::Rule { name, .. } => name.clone(),
@@ -118,60 +118,69 @@ impl MentionUri {
         }
     }
 
-    // todo! return something that implements display to avoid extra allocs
-    pub fn to_link(&self) -> String {
-        let name = self.name();
-        let uri = self.to_uri();
-        format!("[{name}]({uri})")
+    pub fn as_link<'a>(&'a self) -> MentionLink<'a> {
+        MentionLink(self)
     }
 
-    pub fn to_uri(&self) -> String {
+    pub fn to_uri(&self) -> Url {
         match self {
             MentionUri::File(path) => {
-                format!("file://{}", path.display())
+                let mut url = Url::parse("file:///").unwrap();
+                url.set_path(&path.to_string_lossy());
+                url
             }
             MentionUri::Symbol {
                 path,
                 name,
                 line_range,
             } => {
-                let query = url::form_urlencoded::Serializer::new(String::new())
-                    .append_pair("symbol", name)
-                    .finish();
-                format!(
-                    "file://{}?{query}#L{}:{}",
-                    path.display(),
+                let mut url = Url::parse("file:///").unwrap();
+                url.set_path(&path.to_string_lossy());
+                url.query_pairs_mut().append_pair("symbol", name);
+                url.set_fragment(Some(&format!(
+                    "L{}:{}",
                     line_range.start + 1,
-                    line_range.end + 1,
-                )
+                    line_range.end + 1
+                )));
+                url
             }
             MentionUri::Selection { path, line_range } => {
-                format!(
-                    "file://{}#L{}:{}",
-                    path.display(),
+                let mut url = Url::parse("file:///").unwrap();
+                url.set_path(&path.to_string_lossy());
+                url.set_fragment(Some(&format!(
+                    "L{}:{}",
                     line_range.start + 1,
-                    line_range.end + 1,
-                )
+                    line_range.end + 1
+                )));
+                url
             }
             MentionUri::Thread { name, id } => {
-                let query = url::form_urlencoded::Serializer::new(String::new())
-                    .append_pair("name", name)
-                    .finish();
-                format!("zed:///agent/thread/{id}?{query}")
+                let mut url = Url::parse("zed:///").unwrap();
+                url.set_path(&format!("/agent/thread/{id}"));
+                url.query_pairs_mut().append_pair("name", name);
+                url
             }
             MentionUri::TextThread { path, name } => {
-                let query = url::form_urlencoded::Serializer::new(String::new())
-                    .append_pair("name", name)
-                    .finish();
-                format!("zed:///agent/text-thread/{}?{query}", path.display())
+                let mut url = Url::parse("zed:///").unwrap();
+                url.set_path(&format!("/agent/text-thread/{}", path.to_string_lossy()));
+                url.query_pairs_mut().append_pair("name", name);
+                url
             }
             MentionUri::Rule { name, id } => {
-                let query = url::form_urlencoded::Serializer::new(String::new())
-                    .append_pair("name", name)
-                    .finish();
-                format!("zed:///agent/rule/{id}?{query}")
+                let mut url = Url::parse("zed:///").unwrap();
+                url.set_path(&format!("/agent/rule/{id}"));
+                url.query_pairs_mut().append_pair("name", name);
+                url
             }
         }
+    }
+}
+
+pub struct MentionLink<'a>(&'a MentionUri);
+
+impl fmt::Display for MentionLink<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}]({})", self.0.name(), self.0.to_uri())
     }
 }
 
@@ -211,7 +220,7 @@ mod tests {
             MentionUri::File(path) => assert_eq!(path.to_str().unwrap(), "/path/to/file.rs"),
             _ => panic!("Expected File variant"),
         }
-        assert_eq!(parsed.to_uri(), file_uri);
+        assert_eq!(parsed.to_uri().to_string(), file_uri);
     }
 
     #[test]
@@ -231,7 +240,7 @@ mod tests {
             }
             _ => panic!("Expected Symbol variant"),
         }
-        assert_eq!(parsed.to_uri(), symbol_uri);
+        assert_eq!(parsed.to_uri().to_string(), symbol_uri);
     }
 
     #[test]
@@ -246,7 +255,7 @@ mod tests {
             }
             _ => panic!("Expected Selection variant"),
         }
-        assert_eq!(parsed.to_uri(), selection_uri);
+        assert_eq!(parsed.to_uri().to_string(), selection_uri);
     }
 
     #[test]
@@ -263,7 +272,7 @@ mod tests {
             }
             _ => panic!("Expected Thread variant"),
         }
-        assert_eq!(parsed.to_uri(), thread_uri);
+        assert_eq!(parsed.to_uri().to_string(), thread_uri);
     }
 
     #[test]
@@ -277,7 +286,7 @@ mod tests {
             }
             _ => panic!("Expected Rule variant"),
         }
-        assert_eq!(parsed.to_uri(), rule_uri);
+        assert_eq!(parsed.to_uri().to_string(), rule_uri);
     }
 
     #[test]

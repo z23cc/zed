@@ -555,7 +555,7 @@ impl ContextPickerCompletionProvider {
                 name: title.to_string(),
             },
         };
-        let new_text = format!("{} ", uri.to_link());
+        let new_text = format!("{} ", uri.as_link());
 
         let new_text_len = new_text.len();
         Completion {
@@ -590,7 +590,7 @@ impl ContextPickerCompletionProvider {
             id: rule.prompt_id.into(),
             name: rule.title.to_string(),
         };
-        let new_text = format!("{} ", uri.to_link());
+        let new_text = format!("{} ", uri.as_link());
         let new_text_len = new_text.len();
         Completion {
             replace_range: source_range.clone(),
@@ -656,7 +656,7 @@ impl ContextPickerCompletionProvider {
         };
 
         let file_uri = MentionUri::File(abs_path.into());
-        let new_text = format!("{} ", file_uri.to_link());
+        let new_text = format!("{} ", file_uri.as_link());
         let new_text_len = new_text.len();
         Some(Completion {
             replace_range: source_range.clone(),
@@ -698,7 +698,7 @@ impl ContextPickerCompletionProvider {
             name: symbol.name.clone(),
             line_range: symbol.range.start.0.row..symbol.range.end.0.row,
         };
-        let new_text = format!("{} ", uri.to_link());
+        let new_text = format!("{} ", uri.as_link());
         let new_text_len = new_text.len();
         Some(Completion {
             replace_range: source_range.clone(),

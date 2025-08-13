@@ -32,6 +32,7 @@ use project::{CompletionIntent, Project};
 use prompt_store::PromptId;
 use rope::Point;
 use settings::{Settings as _, SettingsStore};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::{
     cell::RefCell, collections::BTreeMap, path::Path, process::ExitStatus, rc::Rc, sync::Arc,
@@ -439,7 +440,7 @@ impl AcpThreadView {
                                         acp::TextResourceContents {
                                             mime_type: None,
                                             text: mention.content.clone(),
-                                            uri: mention.uri.to_uri(),
+                                            uri: mention.uri.to_uri().to_string(),
                                         },
                                     ),
                                 }));
@@ -614,8 +615,7 @@ impl AcpThreadView {
                     let path = PathBuf::from(&resource.uri);
                     let project_path = project.read(cx).project_path_for_absolute_path(&path, cx);
                     let start = text.len();
-                    let content = MentionUri::File(path).to_uri();
-                    text.push_str(&content);
+                    let _ = write!(&mut text, "{}", MentionUri::File(path).to_uri());
                     let end = text.len();
                     if let Some(project_path) = project_path {
                         let filename: SharedString = project_path

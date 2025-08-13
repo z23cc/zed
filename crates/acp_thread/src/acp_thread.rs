@@ -341,7 +341,7 @@ impl ContentBlock {
                 ..
             }) => {
                 if let Some(uri) = MentionUri::parse(&uri).log_err() {
-                    uri.to_link()
+                    uri.as_link().to_string()
                 } else {
                     uri.clone()
                 }

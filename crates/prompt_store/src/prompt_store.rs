@@ -90,7 +90,6 @@ impl From<Uuid> for UserPromptId {
     }
 }
 
-// todo! remove me
 impl std::fmt::Display for PromptId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

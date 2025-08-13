@@ -113,7 +113,7 @@ impl AgentMessage {
                     }
                 }
                 MessageContent::Mention { uri, .. } => {
-                    write!(markdown, "{}", uri.to_link()).ok();
+                    write!(markdown, "{}", uri.as_link()).ok();
                 }
             }
         }
@@ -1228,7 +1228,7 @@ impl AgentMessage {
                         }
                     }
 
-                    language_model::MessageContent::Text(uri.to_link())
+                    language_model::MessageContent::Text(uri.as_link().to_string())
                 }
             };
 
