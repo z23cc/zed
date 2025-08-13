@@ -167,6 +167,7 @@ impl MentionSet {
     }
 }
 
+#[derive(Debug)]
 pub struct Mention {
     pub uri: MentionUri,
     pub content: String,
@@ -1166,16 +1167,16 @@ mod tests {
                 json!({
                     "editor": "",
                     "a": {
-                        "one.txt": "",
-                        "two.txt": "",
-                        "three.txt": "",
-                        "four.txt": ""
+                        "one.txt": "1",
+                        "two.txt": "2",
+                        "three.txt": "3",
+                        "four.txt": "4"
                     },
                     "b": {
-                        "five.txt": "",
-                        "six.txt": "",
-                        "seven.txt": "",
-                        "eight.txt": "",
+                        "five.txt": "5",
+                        "six.txt": "6",
+                        "seven.txt": "7",
+                        "eight.txt": "8",
                     }
                 }),
             )
@@ -1250,14 +1251,17 @@ mod tests {
 
         let mention_set = Arc::new(Mutex::new(MentionSet::default()));
 
+        let thread_store = cx.new(|cx| ThreadStore::fake(project.clone(), cx));
+        let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
+
         let editor_entity = editor.downgrade();
         editor.update_in(&mut cx, |editor, window, cx| {
             window.focus(&editor.focus_handle(cx));
             editor.set_completion_provider(Some(Rc::new(ContextPickerCompletionProvider::new(
                 mention_set.clone(),
                 workspace.downgrade(),
-                WeakEntity::new_invalid(),
-                WeakEntity::new_invalid(),
+                thread_store.downgrade(),
+                text_thread_store.downgrade(),
                 editor_entity,
             ))));
         });
@@ -1328,6 +1332,28 @@ mod tests {
             );
         });
 
+        let contents = cx
+            .update(|window, cx| {
+                mention_set.lock().contents(
+                    project.clone(),
+                    thread_store.clone(),
+                    text_thread_store.clone(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .into_values()
+            .collect::<Vec<_>>();
+
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].content, "1");
+        assert_eq!(
+            contents[0].uri.to_uri().to_string(),
+            "file:///dir/a/one.txt"
+        );
+
         cx.simulate_input(" ");
 
         editor.update(&mut cx, |editor, cx| {
@@ -1373,6 +1399,28 @@ mod tests {
 
         cx.run_until_parked();
 
+        let contents = cx
+            .update(|window, cx| {
+                mention_set.lock().contents(
+                    project.clone(),
+                    thread_store.clone(),
+                    text_thread_store.clone(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .into_values()
+            .collect::<Vec<_>>();
+
+        assert_eq!(contents.len(), 2);
+        let new_mention = contents
+            .iter()
+            .find(|mention| mention.uri.to_uri().to_string() == "file:///dir/b/eight.txt")
+            .unwrap();
+        assert_eq!(new_mention.content, "8");
+
         editor.update(&mut cx, |editor, cx| {
             assert_eq!(
                 editor.text(cx),
@@ -1388,44 +1436,6 @@ mod tests {
             );
         });
 
-        cx.simulate_input("\n@");
-
-        editor.update(&mut cx, |editor, cx| {
-            assert_eq!(
-                editor.text(cx),
-                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) \n@"
-            );
-            assert!(editor.has_visible_completions_menu());
-            assert_eq!(
-                fold_ranges(editor, cx),
-                vec![
-                    Point::new(0, 6)..Point::new(0, 39),
-                    Point::new(0, 47)..Point::new(0, 84)
-                ]
-            );
-        });
-
-        editor.update_in(&mut cx, |editor, window, cx| {
-            editor.confirm_completion(&editor::actions::ConfirmCompletion::default(), window, cx);
-        });
-
-        cx.run_until_parked();
-
-        editor.update(&mut cx, |editor, cx| {
-            assert_eq!(
-                editor.text(cx),
-                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) \n[@seven.txt](file:///dir/b/seven.txt) "
-            );
-            assert!(!editor.has_visible_completions_menu());
-            assert_eq!(
-                fold_ranges(editor, cx),
-                vec![
-                    Point::new(0, 6)..Point::new(0, 39),
-                    Point::new(0, 47)..Point::new(0, 84),
-                    Point::new(1, 0)..Point::new(1, 37)
-                ]
-            );
-        });
         let plain_text_language = Arc::new(language::Language::new(
             language::LanguageConfig {
                 name: "Plain Text".into(),
@@ -1478,8 +1488,8 @@ mod tests {
                         location: lsp::Location {
                             uri: lsp::Url::from_file_path(path!("/dir/a/one.txt")).unwrap(),
                             range: lsp::Range::new(
-                                lsp::Position::new(0, 6),
-                                lsp::Position::new(0, 9),
+                                lsp::Position::new(0, 0),
+                                lsp::Position::new(0, 1),
                             ),
                         },
                         kind: lsp::SymbolKind::CONSTANT,
@@ -1496,7 +1506,7 @@ mod tests {
         editor.update(&mut cx, |editor, cx| {
             assert_eq!(
                 editor.text(cx),
-                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) \n[@seven.txt](file:///dir/b/seven.txt) @symbol "
+                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) @symbol "
             );
             assert!(editor.has_visible_completions_menu());
             assert_eq!(
@@ -1511,12 +1521,36 @@ mod tests {
             editor.confirm_completion(&editor::actions::ConfirmCompletion::default(), window, cx);
         });
 
+        let contents = cx
+            .update(|window, cx| {
+                mention_set.lock().contents(
+                    project.clone(),
+                    thread_store,
+                    text_thread_store,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .into_values()
+            .collect::<Vec<_>>();
+
+        assert_eq!(contents.len(), 3);
+        let new_mention = contents
+            .iter()
+            .find(|mention| {
+                mention.uri.to_uri().to_string() == "file:///dir/a/one.txt?symbol=MySymbol#L1:1"
+            })
+            .unwrap();
+        assert_eq!(new_mention.content, "1");
+
         cx.run_until_parked();
 
         editor.read_with(&mut cx, |editor, cx| {
             assert_eq!(
                 editor.text(cx),
-                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) \n[@seven.txt](file:///dir/b/seven.txt) [@MySymbol](file:///dir/a/one.txt?symbol=MySymbol#L1:1) "
+                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) [@MySymbol](file:///dir/a/one.txt?symbol=MySymbol#L1:1) "
             );
         });
     }
