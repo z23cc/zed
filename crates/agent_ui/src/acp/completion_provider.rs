@@ -1042,6 +1042,7 @@ mod tests {
     use project::{Project, ProjectPath};
     use serde_json::json;
     use settings::SettingsStore;
+    use smol::stream::StreamExt as _;
     use std::{ops::Deref, rc::Rc};
     use util::path;
     use workspace::{AppState, Item};
@@ -1423,6 +1424,99 @@ mod tests {
                     Point::new(0, 47)..Point::new(0, 84),
                     Point::new(1, 0)..Point::new(1, 37)
                 ]
+            );
+        });
+        let plain_text_language = Arc::new(language::Language::new(
+            language::LanguageConfig {
+                name: "Plain Text".into(),
+                matcher: language::LanguageMatcher {
+                    path_suffixes: vec!["txt".to_string()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+        ));
+
+        // Register the language and fake LSP
+        let language_registry = project.read_with(&cx, |project, _| project.languages().clone());
+        language_registry.add(plain_text_language);
+
+        let mut fake_language_servers = language_registry.register_fake_lsp(
+            "Plain Text",
+            language::FakeLspAdapter {
+                capabilities: lsp::ServerCapabilities {
+                    workspace_symbol_provider: Some(lsp::OneOf::Left(true)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        // Open the buffer to trigger LSP initialization
+        let buffer = project
+            .update(&mut cx, |project, cx| {
+                project.open_local_buffer(path!("/dir/a/one.txt"), cx)
+            })
+            .await
+            .unwrap();
+
+        // Register the buffer with language servers
+        let _handle = project.update(&mut cx, |project, cx| {
+            project.register_buffer_with_language_servers(&buffer, cx)
+        });
+
+        cx.run_until_parked();
+
+        let fake_language_server = fake_language_servers.next().await.unwrap();
+        fake_language_server.set_request_handler::<lsp::WorkspaceSymbolRequest, _, _>(
+            |_, _| async move {
+                Ok(Some(lsp::WorkspaceSymbolResponse::Flat(vec![
+                    #[allow(deprecated)]
+                    lsp::SymbolInformation {
+                        name: "MySymbol".into(),
+                        location: lsp::Location {
+                            uri: lsp::Url::from_file_path(path!("/dir/a/one.txt")).unwrap(),
+                            range: lsp::Range::new(
+                                lsp::Position::new(0, 6),
+                                lsp::Position::new(0, 9),
+                            ),
+                        },
+                        kind: lsp::SymbolKind::CONSTANT,
+                        tags: None,
+                        container_name: None,
+                        deprecated: None,
+                    },
+                ])))
+            },
+        );
+
+        cx.simulate_input("@symbol ");
+
+        editor.update(&mut cx, |editor, cx| {
+            assert_eq!(
+                editor.text(cx),
+                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) \n[@seven.txt](file:///dir/b/seven.txt) @symbol "
+            );
+            assert!(editor.has_visible_completions_menu());
+            assert_eq!(
+                current_completion_labels(editor),
+                &[
+                    "MySymbol",
+                ]
+            );
+        });
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.confirm_completion(&editor::actions::ConfirmCompletion::default(), window, cx);
+        });
+
+        cx.run_until_parked();
+
+        editor.read_with(&mut cx, |editor, cx| {
+            assert_eq!(
+                editor.text(cx),
+                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) \n[@seven.txt](file:///dir/b/seven.txt) [@MySymbol](file:///dir/a/one.txt?symbol=MySymbol#L1:1)"
             );
         });
     }
