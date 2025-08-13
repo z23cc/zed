@@ -180,7 +180,7 @@ pub struct MentionLink<'a>(&'a MentionUri);
 
 impl fmt::Display for MentionLink<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}]({})", self.0.name(), self.0.to_uri())
+        write!(f, "[@{}]({})", self.0.name(), self.0.to_uri())
     }
 }
 
