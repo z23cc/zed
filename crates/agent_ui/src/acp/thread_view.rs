@@ -2701,6 +2701,9 @@ impl AcpThreadView {
                         cx,
                     )
                 }
+                MentionUri::Fetch { url } => {
+                    cx.open_url(url.as_str());
+                }
             })
         } else {
             cx.open_url(&url);

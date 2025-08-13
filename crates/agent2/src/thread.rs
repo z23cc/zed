@@ -1151,12 +1151,14 @@ impl AgentMessage {
         const OPEN_FILES_TAG: &str = "<files>";
         const OPEN_SYMBOLS_TAG: &str = "<symbols>";
         const OPEN_THREADS_TAG: &str = "<threads>";
+        const OPEN_FETCH_TAG: &str = "<fetched_urls>";
         const OPEN_RULES_TAG: &str =
             "<rules>\nThe user has specified the following rules that should be applied:\n";
 
         let mut file_context = OPEN_FILES_TAG.to_string();
         let mut symbol_context = OPEN_SYMBOLS_TAG.to_string();
         let mut thread_context = OPEN_THREADS_TAG.to_string();
+        let mut fetch_context = OPEN_FETCH_TAG.to_string();
         let mut rules_context = OPEN_RULES_TAG.to_string();
 
         for chunk in &self.content {
@@ -1226,6 +1228,17 @@ impl AgentMessage {
                             )
                             .ok();
                         }
+                        MentionUri::Fetch { url } => {
+                            write!(
+                                &mut fetch_context,
+                                "\n{}",
+                                MarkdownCodeBlock {
+                                    tag: &format!("md {url}"),
+                                    text: &content
+                                }
+                            )
+                            .ok();
+                        }
                     }
 
                     language_model::MessageContent::Text(uri.as_link().to_string())
@@ -1256,6 +1269,13 @@ impl AgentMessage {
             message
                 .content
                 .push(language_model::MessageContent::Text(thread_context));
+        }
+
+        if fetch_context.len() > OPEN_FETCH_TAG.len() {
+            fetch_context.push_str("</fetched_urls>\n");
+            message
+                .content
+                .push(language_model::MessageContent::Text(fetch_context));
         }
 
         if rules_context.len() > OPEN_RULES_TAG.len() {

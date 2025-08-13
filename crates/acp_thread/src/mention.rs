@@ -32,6 +32,9 @@ pub enum MentionUri {
         path: PathBuf,
         line_range: Range<u32>,
     },
+    Fetch {
+        url: Url,
+    },
 }
 
 impl MentionUri {
@@ -97,6 +100,7 @@ impl MentionUri {
                     bail!("invalid zed url: {:?}", input);
                 }
             }
+            "http" | "https" => Ok(MentionUri::Fetch { url }),
             other => bail!("unrecognized scheme {:?}", other),
         }
     }
@@ -115,6 +119,7 @@ impl MentionUri {
             MentionUri::Selection {
                 path, line_range, ..
             } => selection_name(path, line_range),
+            MentionUri::Fetch { url } => url.to_string(),
         }
     }
 
@@ -172,6 +177,7 @@ impl MentionUri {
                 url.query_pairs_mut().append_pair("name", name);
                 url
             }
+            MentionUri::Fetch { url } => url.clone(),
         }
     }
 }
@@ -290,10 +296,36 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_fetch_http_uri() {
+        let http_uri = "http://example.com/path?query=value#fragment";
+        let parsed = MentionUri::parse(http_uri).unwrap();
+        match &parsed {
+            MentionUri::Fetch { url } => {
+                assert_eq!(url.to_string(), http_uri);
+            }
+            _ => panic!("Expected Fetch variant"),
+        }
+        assert_eq!(parsed.to_uri().to_string(), http_uri);
+    }
+
+    #[test]
+    fn test_parse_fetch_https_uri() {
+        let https_uri = "https://example.com/api/endpoint";
+        let parsed = MentionUri::parse(https_uri).unwrap();
+        match &parsed {
+            MentionUri::Fetch { url } => {
+                assert_eq!(url.to_string(), https_uri);
+            }
+            _ => panic!("Expected Fetch variant"),
+        }
+        assert_eq!(parsed.to_uri().to_string(), https_uri);
+    }
+
+    #[test]
     fn test_invalid_scheme() {
-        assert!(MentionUri::parse("http://example.com").is_err());
-        assert!(MentionUri::parse("https://example.com").is_err());
         assert!(MentionUri::parse("ftp://example.com").is_err());
+        assert!(MentionUri::parse("ssh://example.com").is_err());
+        assert!(MentionUri::parse("unknown://example.com").is_err());
     }
 
     #[test]

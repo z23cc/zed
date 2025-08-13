@@ -12,6 +12,7 @@ use file_icons::FileIcons;
 use futures::future::try_join_all;
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{App, Entity, Task, WeakEntity};
+use http_client::HttpClientWithUrl;
 use itertools::Itertools as _;
 use language::{Buffer, CodeLabel, HighlightId};
 use lsp::CompletionContext;
@@ -23,6 +24,7 @@ use prompt_store::PromptStore;
 use rope::Point;
 use text::{Anchor, OffsetRangeExt as _, ToPoint as _};
 use ui::prelude::*;
+use url::Url;
 use workspace::Workspace;
 
 use agent::{
@@ -45,6 +47,7 @@ use crate::context_picker::{
 #[derive(Default)]
 pub struct MentionSet {
     uri_by_crease_id: HashMap<CreaseId, MentionUri>,
+    fetch_results: HashMap<Url, String>,
 }
 
 impl MentionSet {
@@ -67,95 +70,110 @@ impl MentionSet {
         let contents = self
             .uri_by_crease_id
             .iter()
-            .map(|(&crease_id, uri)| match uri {
-                MentionUri::File(path) => {
-                    let uri = uri.clone();
-                    let path = path.to_path_buf();
-                    let buffer_task = project.update(cx, |project, cx| {
-                        let path = project
-                            .find_project_path(path, cx)
-                            .context("Failed to find project path")?;
-                        anyhow::Ok(project.open_buffer(path, cx))
-                    });
+            .map(|(&crease_id, uri)| {
+                match uri {
+                    MentionUri::File(path) => {
+                        let uri = uri.clone();
+                        let path = path.to_path_buf();
+                        let buffer_task = project.update(cx, |project, cx| {
+                            let path = project
+                                .find_project_path(path, cx)
+                                .context("Failed to find project path")?;
+                            anyhow::Ok(project.open_buffer(path, cx))
+                        });
 
-                    cx.spawn(async move |cx| {
-                        let buffer = buffer_task?.await?;
-                        let content = buffer.read_with(cx, |buffer, _cx| buffer.text())?;
+                        cx.spawn(async move |cx| {
+                            let buffer = buffer_task?.await?;
+                            let content = buffer.read_with(cx, |buffer, _cx| buffer.text())?;
 
-                        anyhow::Ok((crease_id, Mention { uri, content }))
-                    })
-                }
-                MentionUri::Symbol {
-                    path, line_range, ..
-                }
-                | MentionUri::Selection {
-                    path, line_range, ..
-                } => {
-                    let uri = uri.clone();
-                    let path_buf = path.clone();
-                    let line_range = line_range.clone();
+                            anyhow::Ok((crease_id, Mention { uri, content }))
+                        })
+                    }
+                    MentionUri::Symbol {
+                        path, line_range, ..
+                    }
+                    | MentionUri::Selection {
+                        path, line_range, ..
+                    } => {
+                        let uri = uri.clone();
+                        let path_buf = path.clone();
+                        let line_range = line_range.clone();
 
-                    let buffer_task = project.update(cx, |project, cx| {
-                        let path = project
-                            .find_project_path(&path_buf, cx)
-                            .context("Failed to find project path")?;
-                        anyhow::Ok(project.open_buffer(path, cx))
-                    });
+                        let buffer_task = project.update(cx, |project, cx| {
+                            let path = project
+                                .find_project_path(&path_buf, cx)
+                                .context("Failed to find project path")?;
+                            anyhow::Ok(project.open_buffer(path, cx))
+                        });
 
-                    cx.spawn(async move |cx| {
-                        let buffer = buffer_task?.await?;
-                        let content = buffer.read_with(cx, |buffer, _cx| {
-                            buffer
-                                .text_for_range(
-                                    Point::new(line_range.start, 0)
-                                        ..Point::new(
-                                            line_range.end,
-                                            buffer.line_len(line_range.end),
-                                        ),
-                                )
-                                .collect()
-                        })?;
+                        cx.spawn(async move |cx| {
+                            let buffer = buffer_task?.await?;
+                            let content = buffer.read_with(cx, |buffer, _cx| {
+                                buffer
+                                    .text_for_range(
+                                        Point::new(line_range.start, 0)
+                                            ..Point::new(
+                                                line_range.end,
+                                                buffer.line_len(line_range.end),
+                                            ),
+                                    )
+                                    .collect()
+                            })?;
 
-                        anyhow::Ok((crease_id, Mention { uri, content }))
-                    })
-                }
-                MentionUri::Thread { id: thread_id, .. } => {
-                    let open_task = thread_store.update(cx, |thread_store, cx| {
-                        thread_store.open_thread(&thread_id, window, cx)
-                    });
+                            anyhow::Ok((crease_id, Mention { uri, content }))
+                        })
+                    }
+                    MentionUri::Thread { id: thread_id, .. } => {
+                        let open_task = thread_store.update(cx, |thread_store, cx| {
+                            thread_store.open_thread(&thread_id, window, cx)
+                        });
 
-                    let uri = uri.clone();
-                    cx.spawn(async move |cx| {
-                        let thread = open_task.await?;
-                        let content = thread.read_with(cx, |thread, _cx| {
-                            thread.latest_detailed_summary_or_text().to_string()
-                        })?;
+                        let uri = uri.clone();
+                        cx.spawn(async move |cx| {
+                            let thread = open_task.await?;
+                            let content = thread.read_with(cx, |thread, _cx| {
+                                thread.latest_detailed_summary_or_text().to_string()
+                            })?;
 
-                        anyhow::Ok((crease_id, Mention { uri, content }))
-                    })
-                }
-                MentionUri::TextThread { path, .. } => {
-                    let context = text_thread_store.update(cx, |text_thread_store, cx| {
-                        text_thread_store.open_local_context(path.as_path().into(), cx)
-                    });
-                    let uri = uri.clone();
-                    cx.spawn(async move |cx| {
-                        let context = context.await?;
-                        let xml = context.update(cx, |context, cx| context.to_xml(cx))?;
-                        anyhow::Ok((crease_id, Mention { uri, content: xml }))
-                    })
-                }
-                MentionUri::Rule { id: prompt_id, .. } => {
-                    let Some(prompt_store) = thread_store.read(cx).prompt_store().clone() else {
-                        return Task::ready(Err(anyhow!("missing prompt store")));
-                    };
-                    let text_task = prompt_store.read(cx).load(prompt_id.clone(), cx);
-                    let uri = uri.clone();
-                    cx.spawn(async move |_| {
-                        // TODO: report load errors instead of just logging
-                        let text = text_task.await?;
-                        anyhow::Ok((crease_id, Mention { uri, content: text }))
-                    })
+                            anyhow::Ok((crease_id, Mention { uri, content }))
+                        })
+                    }
+                    MentionUri::TextThread { path, .. } => {
+                        let context = text_thread_store.update(cx, |text_thread_store, cx| {
+                            text_thread_store.open_local_context(path.as_path().into(), cx)
+                        });
+                        let uri = uri.clone();
+                        cx.spawn(async move |cx| {
+                            let context = context.await?;
+                            let xml = context.update(cx, |context, cx| context.to_xml(cx))?;
+                            anyhow::Ok((crease_id, Mention { uri, content: xml }))
+                        })
+                    }
+                    MentionUri::Rule { id: prompt_id, .. } => {
+                        let Some(prompt_store) = thread_store.read(cx).prompt_store().clone()
+                        else {
+                            return Task::ready(Err(anyhow!("missing prompt store")));
+                        };
+                        let text_task = prompt_store.read(cx).load(prompt_id.clone(), cx);
+                        let uri = uri.clone();
+                        cx.spawn(async move |_| {
+                            // TODO: report load errors instead of just logging
+                            let text = text_task.await?;
+                            anyhow::Ok((crease_id, Mention { uri, content: text }))
+                        })
+                    }
+                    MentionUri::Fetch { url } => {
+                        let Some(content) = self.fetch_results.get(&url) else {
+                            return Task::ready(Err(anyhow!("missing fetch result")));
+                        };
+                        Task::ready(Ok((
+                            crease_id,
+                            Mention {
+                                uri: uri.clone(),
+                                content: content.clone(),
+                            },
+                        )))
+                    }
                 }
             })
             .collect::<Vec<_>>();
@@ -177,6 +195,7 @@ pub(crate) enum Match {
     File(FileMatch),
     Symbol(SymbolMatch),
     Thread(ThreadMatch),
+    Fetch(SharedString),
     Rules(RulesContextEntry),
     Entry(EntryMatch),
 }
@@ -194,6 +213,7 @@ impl Match {
             Match::Thread(_) => 1.,
             Match::Symbol(_) => 1.,
             Match::Rules(_) => 1.,
+            Match::Fetch(_) => 1.,
         }
     }
 }
@@ -721,6 +741,40 @@ impl ContextPickerCompletionProvider {
             )),
         })
     }
+
+    fn completion_for_fetch(
+        source_range: Range<Anchor>,
+        url_to_fetch: SharedString,
+        excerpt_id: ExcerptId,
+        editor: Entity<Editor>,
+        mention_set: Arc<Mutex<MentionSet>>,
+        http_client: Arc<HttpClientWithUrl>,
+    ) -> Option<Completion> {
+        let url = url::Url::parse(url_to_fetch.as_ref()).ok()?;
+        let mention_uri = MentionUri::Fetch { url };
+        let new_text = format!("{} ", mention_uri.as_link());
+        let new_text_len = new_text.len();
+        Some(Completion {
+            replace_range: source_range.clone(),
+            new_text,
+            label: CodeLabel::plain(url_to_fetch.to_string(), None),
+            documentation: None,
+            source: project::CompletionSource::Custom,
+            icon_path: Some(IconName::ToolWeb.path().into()),
+            insert_text_mode: None,
+            // todo! custom callback to fetch
+            confirm: Some(confirm_completion_callback(
+                IconName::ToolWeb.path().into(),
+                url_to_fetch.clone(),
+                excerpt_id,
+                source_range.start,
+                new_text_len - 1,
+                editor.clone(),
+                mention_set,
+                mention_uri,
+            )),
+        })
+    }
 }
 
 fn build_code_label_for_full_path(file_name: &str, directory: Option<&str>, cx: &App) -> CodeLabel {
@@ -884,6 +938,15 @@ impl CompletionProvider for ContextPickerCompletionProvider {
                             editor.clone(),
                             mention_set.clone(),
                         )),
+
+                        Match::Fetch(url) => Self::completion_for_fetch(
+                            source_range.clone(),
+                            url,
+                            excerpt_id,
+                            editor.clone(),
+                            mention_set.clone(),
+                            todo!(),
+                        ),
 
                         Match::Entry(EntryMatch { entry, .. }) => Self::completion_for_entry(
                             entry,
