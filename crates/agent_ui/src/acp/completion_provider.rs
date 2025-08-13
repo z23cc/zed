@@ -26,12 +26,14 @@ use text::{Anchor, OffsetRangeExt as _, ToPoint as _};
 use ui::prelude::*;
 use url::Url;
 use workspace::Workspace;
+use workspace::notifications::NotifyResultExt;
 
 use agent::{
     context::RULES_ICON,
     thread_store::{TextThreadStore, ThreadStore},
 };
 
+use crate::context_picker::fetch_context_picker::fetch_url_content;
 use crate::context_picker::file_context_picker::{FileMatch, search_files};
 use crate::context_picker::rules_context_picker::{RulesContextEntry, search_rules};
 use crate::context_picker::symbol_context_picker::SymbolMatch;
@@ -53,6 +55,10 @@ pub struct MentionSet {
 impl MentionSet {
     pub fn insert(&mut self, crease_id: CreaseId, uri: MentionUri) {
         self.uri_by_crease_id.insert(crease_id, uri);
+    }
+
+    pub fn add_fetch_result(&mut self, url: Url, content: String) {
+        self.fetch_results.insert(url, content);
     }
 
     pub fn drain(&mut self) -> impl Iterator<Item = CreaseId> {
@@ -279,8 +285,11 @@ fn search(
         }
 
         Some(ContextPickerMode::Fetch) => {
-            // todo! make a new mode type for acp?
-            unreachable!()
+            if !query.is_empty() {
+                Task::ready(vec![Match::Fetch(query.into())])
+            } else {
+                Task::ready(Vec::new())
+            }
         }
 
         Some(ContextPickerMode::Rules) => {
@@ -750,9 +759,7 @@ impl ContextPickerCompletionProvider {
         mention_set: Arc<Mutex<MentionSet>>,
         http_client: Arc<HttpClientWithUrl>,
     ) -> Option<Completion> {
-        let url = url::Url::parse(url_to_fetch.as_ref()).ok()?;
-        let mention_uri = MentionUri::Fetch { url };
-        let new_text = format!("{} ", mention_uri.as_link());
+        let new_text = format!("@fetch {} ", url_to_fetch.clone());
         let new_text_len = new_text.len();
         Some(Completion {
             replace_range: source_range.clone(),
@@ -762,17 +769,82 @@ impl ContextPickerCompletionProvider {
             source: project::CompletionSource::Custom,
             icon_path: Some(IconName::ToolWeb.path().into()),
             insert_text_mode: None,
-            // todo! custom callback to fetch
-            confirm: Some(confirm_completion_callback(
-                IconName::ToolWeb.path().into(),
-                url_to_fetch.clone(),
-                excerpt_id,
-                source_range.start,
-                new_text_len - 1,
-                editor.clone(),
-                mention_set,
-                mention_uri,
-            )),
+            confirm: Some({
+                let start = source_range.start;
+                let content_len = new_text_len - 1;
+                let editor = editor.clone();
+                let url_to_fetch = url_to_fetch.clone();
+                let source_range = source_range.clone();
+                Arc::new(move |_, window, cx| {
+                    let Some(url) = url::Url::parse(url_to_fetch.as_ref())
+                        .or_else(|_| url::Url::parse(&format!("https://{url_to_fetch}")))
+                        .notify_app_err(cx)
+                    else {
+                        return false;
+                    };
+                    let mention_uri = MentionUri::Fetch { url: url.clone() };
+
+                    let editor = editor.clone();
+                    let mention_set = mention_set.clone();
+                    let http_client = http_client.clone();
+                    let source_range = source_range.clone();
+                    window.defer(cx, move |window, cx| {
+                        let url = url.clone();
+
+                        let Some(crease_id) = crate::context_picker::insert_crease_for_mention(
+                            excerpt_id,
+                            start,
+                            content_len,
+                            url.to_string().into(),
+                            IconName::ToolWeb.path().into(),
+                            editor.clone(),
+                            window,
+                            cx,
+                        ) else {
+                            return;
+                        };
+
+                        let editor = editor.clone();
+                        let mention_set = mention_set.clone();
+                        let http_client = http_client.clone();
+                        let source_range = source_range.clone();
+                        window
+                            .spawn(cx, async move |cx| {
+                                if let Some(content) =
+                                    fetch_url_content(http_client, url.to_string())
+                                        .await
+                                        .notify_async_err(cx)
+                                {
+                                    mention_set.lock().add_fetch_result(url, content);
+                                    mention_set.lock().insert(crease_id, mention_uri.clone());
+                                } else {
+                                    // Remove crease if we failed to fetch
+                                    editor
+                                        .update(cx, |editor, cx| {
+                                            let snapshot = editor.buffer().read(cx).snapshot(cx);
+                                            let Some(anchor) = snapshot
+                                                .anchor_in_excerpt(excerpt_id, source_range.start)
+                                            else {
+                                                return;
+                                            };
+                                            editor.display_map.update(cx, |display_map, cx| {
+                                                display_map.unfold_intersecting(
+                                                    vec![anchor..anchor],
+                                                    true,
+                                                    cx,
+                                                );
+                                            });
+                                            editor.remove_creases([crease_id], cx);
+                                        })
+                                        .ok();
+                                }
+                                Some(())
+                            })
+                            .detach();
+                    });
+                    false
+                })
+            }),
         })
     }
 }
@@ -820,6 +892,7 @@ impl CompletionProvider for ContextPickerCompletionProvider {
         };
 
         let project = workspace.read(cx).project().clone();
+        let http_client = workspace.read(cx).client().http_client();
         let snapshot = buffer.read(cx).snapshot();
         let source_range = snapshot.anchor_before(state.source_range.start)
             ..snapshot.anchor_after(state.source_range.end);
@@ -945,7 +1018,7 @@ impl CompletionProvider for ContextPickerCompletionProvider {
                             excerpt_id,
                             editor.clone(),
                             mention_set.clone(),
-                            todo!(),
+                            http_client.clone(),
                         ),
 
                         Match::Entry(EntryMatch { entry, .. }) => Self::completion_for_entry(

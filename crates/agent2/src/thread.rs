@@ -1229,15 +1229,7 @@ impl AgentMessage {
                             .ok();
                         }
                         MentionUri::Fetch { url } => {
-                            write!(
-                                &mut fetch_context,
-                                "\n{}",
-                                MarkdownCodeBlock {
-                                    tag: &format!("md {url}"),
-                                    text: &content
-                                }
-                            )
-                            .ok();
+                            write!(&mut fetch_context, "\nFetch: {}\n\n{}", url, content).ok();
                         }
                     }
 
