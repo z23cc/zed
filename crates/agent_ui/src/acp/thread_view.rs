@@ -11,9 +11,10 @@ use agent_settings::{AgentSettings, NotifyWhenAgentWaiting};
 use audio::{Audio, Sound};
 use buffer_diff::BufferDiff;
 use collections::{HashMap, HashSet};
+use editor::scroll::Autoscroll;
 use editor::{
     AnchorRangeExt, ContextMenuOptions, ContextMenuPlacement, Editor, EditorElement, EditorMode,
-    EditorStyle, MinimapVisibility, MultiBuffer, PathKey,
+    EditorStyle, MinimapVisibility, MultiBuffer, PathKey, SelectionEffects,
 };
 use file_icons::FileIcons;
 use gpui::{
@@ -28,6 +29,8 @@ use language::{Buffer, Language};
 use markdown::{HeadingLevelStyles, Markdown, MarkdownElement, MarkdownStyle};
 use parking_lot::Mutex;
 use project::{CompletionIntent, Project};
+use prompt_store::PromptId;
+use rope::Point;
 use settings::{Settings as _, SettingsStore};
 use std::path::PathBuf;
 use std::{
@@ -43,6 +46,7 @@ use ui::{
 use util::{ResultExt, size::format_file_size, time::duration_alt_display};
 use workspace::{CollaboratorId, Workspace};
 use zed_actions::agent::{Chat, NextHistoryMessage, PreviousHistoryMessage};
+use zed_actions::assistant::OpenRulesLibrary;
 
 use crate::acp::completion_provider::{ContextPickerCompletionProvider, MentionSet};
 use crate::acp::message_history::MessageHistory;
@@ -2633,9 +2637,69 @@ impl AcpThreadView {
                             .detach_and_log_err(cx);
                     }
                 }
-                _ => {
-                    // TODO
-                    unimplemented!()
+                MentionUri::Symbol {
+                    path, line_range, ..
+                }
+                | MentionUri::Selection { path, line_range } => {
+                    let project = workspace.project();
+                    let Some((path, _)) = project.update(cx, |project, cx| {
+                        let path = project.find_project_path(path, cx)?;
+                        let entry = project.entry_for_path(&path, cx)?;
+                        Some((path, entry))
+                    }) else {
+                        return;
+                    };
+
+                    let item = workspace.open_path(path, None, true, window, cx);
+                    window
+                        .spawn(cx, async move |cx| {
+                            let Some(editor) = item.await?.downcast::<Editor>() else {
+                                return Ok(());
+                            };
+                            let range = Point::new(line_range.start as u32, 0)
+                                ..Point::new(line_range.start as u32, 0);
+                            editor
+                                .update_in(cx, |editor, window, cx| {
+                                    editor.change_selections(
+                                        SelectionEffects::scroll(Autoscroll::center()),
+                                        window,
+                                        cx,
+                                        |s| s.select_ranges(vec![range]),
+                                    );
+                                })
+                                .ok();
+                            anyhow::Ok(())
+                        })
+                        .detach_and_log_err(cx);
+                }
+                MentionUri::Thread { id, .. } => {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel
+                                .open_thread_by_id(&id, window, cx)
+                                .detach_and_log_err(cx)
+                        });
+                    }
+                }
+                MentionUri::TextThread { path, .. } => {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel
+                                .open_saved_prompt_editor(path.as_path().into(), window, cx)
+                                .detach_and_log_err(cx);
+                        });
+                    }
+                }
+                MentionUri::Rule { id, .. } => {
+                    let PromptId::User { uuid } = id else {
+                        return;
+                    };
+                    window.dispatch_action(
+                        Box::new(OpenRulesLibrary {
+                            prompt_to_select: Some(uuid.0),
+                        }),
+                        cx,
+                    )
                 }
             })
         } else {
