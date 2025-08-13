@@ -1516,7 +1516,7 @@ mod tests {
         editor.read_with(&mut cx, |editor, cx| {
             assert_eq!(
                 editor.text(cx),
-                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) \n[@seven.txt](file:///dir/b/seven.txt) [@MySymbol](file:///dir/a/one.txt?symbol=MySymbol#L1:1)"
+                "Lorem [@one.txt](file:///dir/a/one.txt)  Ipsum [@eight.txt](file:///dir/b/eight.txt) \n[@seven.txt](file:///dir/b/seven.txt) [@MySymbol](file:///dir/a/one.txt?symbol=MySymbol#L1:1) "
             );
         });
     }
