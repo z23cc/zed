@@ -688,29 +688,13 @@ impl ContextPickerCompletionProvider {
         workspace: Entity<Workspace>,
         cx: &mut App,
     ) -> Option<Completion> {
-        let path_prefix = workspace
-            .read(cx)
-            .project()
-            .read(cx)
-            .worktree_for_id(symbol.path.worktree_id, cx)?
-            .read(cx)
-            .root_name();
-
-        let (file_name, directory) =
-            crate::context_picker::file_context_picker::extract_file_name_and_directory(
-                &symbol.path.path,
-                path_prefix,
-            );
-        let full_path = if let Some(directory) = directory {
-            format!("{}{}", directory, file_name)
-        } else {
-            file_name.to_string()
-        };
+        let project = workspace.read(cx).project().clone();
 
         let label = CodeLabel::plain(symbol.name.clone(), None);
 
+        let abs_path = project.read(cx).absolute_path(&symbol.path, cx)?;
         let uri = MentionUri::Symbol {
-            path: full_path.into(),
+            path: abs_path,
             name: symbol.name.clone(),
             line_range: symbol.range.start.0.row..symbol.range.end.0.row,
         };

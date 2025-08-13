@@ -135,10 +135,12 @@ impl MentionUri {
                 name,
                 line_range,
             } => {
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("symbol", name)
+                    .finish();
                 format!(
-                    "file://{}?symbol={}#L{}:{}",
+                    "file://{}?{query}#L{}:{}",
                     path.display(),
-                    name,
                     line_range.start + 1,
                     line_range.end + 1,
                 )
@@ -152,13 +154,22 @@ impl MentionUri {
                 )
             }
             MentionUri::Thread { name, id } => {
-                format!("zed:///agent/thread/{id}?name={name}")
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("name", name)
+                    .finish();
+                format!("zed:///agent/thread/{id}?{query}")
             }
             MentionUri::TextThread { path, name } => {
-                format!("zed:///agent/text-thread/{}?name={name}", path.display())
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("name", name)
+                    .finish();
+                format!("zed:///agent/text-thread/{}?{query}", path.display())
             }
             MentionUri::Rule { name, id } => {
-                format!("zed:///agent/rule/{id}?name={name}")
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("name", name)
+                    .finish();
+                format!("zed:///agent/rule/{id}?{query}")
             }
         }
     }
