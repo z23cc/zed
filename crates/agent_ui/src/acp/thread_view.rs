@@ -1916,44 +1916,54 @@ impl AcpThreadView {
         cx: &Context<Self>,
     ) -> Div {
         v_flex()
-            .p_2()
-            .gap_2()
+            .py_2()
+            .px_8()
+            .w_full()
             .flex_1()
             .items_center()
             .justify_center()
             .child(
                 v_flex()
-                    .items_center()
+                    .w_full()
+                    .max_w(px(530.))
                     .justify_center()
-                    .child(self.render_error_agent_logo())
+                    .gap_2()
                     .child(
-                        h_flex().mt_4().mb_1().justify_center().child(
-                            Headline::new("Authentication Required").size(HeadlineSize::Medium),
-                        ),
+                        v_flex()
+                            .justify_center()
+                            .items_center()
+                            .child(self.render_error_agent_logo())
+                            .child(h_flex().mt_4().mb_1().justify_center().child(
+                                Headline::new("Authentication Required").size(HeadlineSize::Medium),
+                            ))
+                            .into_any(),
                     )
-                    .into_any(),
-            )
-            .children(description.map(|desc| {
-                div().text_ui(cx).text_center().child(
-                    self.render_markdown(desc.clone(), default_markdown_style(false, window, cx)),
-                )
-            }))
-            .children(
-                configuration_view
-                    .cloned()
-                    .map(|view| div().px_4().w_full().max_w_128().child(view)),
-            )
-            .child(h_flex().mt_1p5().justify_center().children(
-                connection.auth_methods().into_iter().map(|method| {
-                    Button::new(SharedString::from(method.id.0.clone()), method.name.clone())
-                        .on_click({
-                            let method_id = method.id.clone();
-                            cx.listener(move |this, _, window, cx| {
-                                this.authenticate(method_id.clone(), window, cx)
+                    .children(description.map(|desc| {
+                        div().text_ui(cx).text_center().child(self.render_markdown(
+                            desc.clone(),
+                            default_markdown_style(false, window, cx),
+                        ))
+                    }))
+                    .children(
+                        configuration_view
+                            .cloned()
+                            .map(|view| div().w_full().child(view)),
+                    )
+                    .child(h_flex().mt_1p5().justify_center().children(
+                        connection.auth_methods().into_iter().map(|method| {
+                            Button::new(
+                                SharedString::from(method.id.0.clone()),
+                                method.name.clone(),
+                            )
+                            .on_click({
+                                let method_id = method.id.clone();
+                                cx.listener(move |this, _, window, cx| {
+                                    this.authenticate(method_id.clone(), window, cx)
+                                })
                             })
-                        })
-                }),
-            ))
+                        }),
+                    )),
+            )
     }
 
     fn render_server_exited(&self, status: ExitStatus, _cx: &Context<Self>) -> AnyElement {
