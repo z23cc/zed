@@ -160,22 +160,44 @@ impl Vim {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mode = self.mode;
         self.update_editor(cx, |_, editor, cx| {
             let text_layout_details = editor.text_layout_details(window);
             editor.change_selections(Default::default(), window, cx, |s| {
                 s.move_with(|map, selection| {
-                    let goal = selection.goal;
+                    let was_reversed = selection.reversed;
                     let cursor = if selection.is_empty() || selection.reversed {
                         selection.head()
                     } else {
-                        movement::left(map, selection.head())
+                        movement::left(map, selection.end)
                     };
 
-                    let (point, goal) = motion
-                        .move_point(map, cursor, selection.goal, times, &text_layout_details)
-                        .unwrap_or((cursor, goal));
+                    let Some((point, goal)) =
+                        motion.move_point(map, cursor, selection.goal, times, &text_layout_details)
+                    else {
+                        return;
+                    };
 
-                    selection.collapse_to(point, goal)
+                    selection.set_head(point, goal);
+
+                    if mode == Mode::HelixNormal {
+                        selection.collapse_to(point, goal);
+                    } else {
+                        // ensure the current character is included in the selection.
+                        if !selection.reversed {
+                            let next_point = movement::right(map, selection.end);
+
+                            if !(next_point.column() == 0 && next_point == map.max_point()) {
+                                selection.end = next_point;
+                            }
+                        }
+
+                        if was_reversed && !selection.reversed {
+                            selection.start = movement::left(map, selection.start);
+                        } else if !was_reversed && selection.reversed {
+                            selection.end = movement::right(map, selection.end);
+                        }
+                    }
                 })
             });
         });
@@ -316,6 +338,7 @@ impl Vim {
                     cx,
                 );
             }
+            vim.mode = Mode::HelixNormal;
         });
     }
 
@@ -843,9 +866,16 @@ mod test {
         assert_eq!(cx.mode(), Mode::Normal);
         cx.enable_helix();
 
+        cx.set_state("ˇfoo", Mode::HelixNormal);
+
         cx.simulate_keystrokes("v");
         assert_eq!(cx.mode(), Mode::HelixSelect);
-        cx.simulate_keystrokes("escape");
+
+        cx.simulate_keystrokes("right y");
+        cx.shared_clipboard().assert_eq("fo");
+        assert_eq!(cx.mode(), Mode::HelixNormal);
+
+        cx.simulate_keystrokes("v escape");
         assert_eq!(cx.mode(), Mode::HelixNormal);
     }
 
