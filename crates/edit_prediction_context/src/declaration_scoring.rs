@@ -1,4 +1,3 @@
-use gpui::{App, Entity};
 use itertools::Itertools as _;
 use language::BufferSnapshot;
 use serde::Serialize;
@@ -7,8 +6,9 @@ use strum::EnumIter;
 use text::{OffsetRangeExt, Point, ToPoint};
 
 use crate::{
-    Declaration, EditPredictionExcerpt, EditPredictionExcerptText, Identifier, SyntaxIndex,
+    Declaration, EditPredictionExcerpt, EditPredictionExcerptText, Identifier,
     reference::{Reference, ReferenceRegion},
+    syntax_index::SyntaxIndexState,
     text_similarity::{IdentifierOccurrences, jaccard_similarity, weighted_overlap_coefficient},
 };
 
@@ -50,14 +50,13 @@ impl ScoredSnippet {
     }
 }
 
-fn scored_snippets(
-    index: Entity<SyntaxIndex>,
+pub fn scored_snippets(
+    index: &SyntaxIndexState,
     excerpt: &EditPredictionExcerpt,
     excerpt_text: &EditPredictionExcerptText,
     identifier_to_references: HashMap<Identifier, Vec<Reference>>,
     cursor_offset: usize,
     current_buffer: &BufferSnapshot,
-    cx: &App,
 ) -> Vec<ScoredSnippet> {
     let containing_range_identifier_occurrences =
         IdentifierOccurrences::within_string(&excerpt_text.body);
@@ -74,22 +73,19 @@ fn scored_snippets(
     identifier_to_references
         .into_iter()
         .flat_map(|(identifier, references)| {
-            let declarations = index
-                .read(cx)
-                // todo! pick a limit
-                .declarations_for_identifier::<16>(&identifier, cx);
+            // todo! pick a limit
+            let declarations = index.declarations_for_identifier::<16>(&identifier);
             let declaration_count = declarations.len();
 
             declarations
                 .iter()
                 .filter_map(|declaration| match declaration {
                     Declaration::Buffer {
+                        buffer_id,
                         declaration: buffer_declaration,
-                        buffer,
+                        ..
                     } => {
-                        let is_same_file = buffer
-                            .read_with(cx, |buffer, _| buffer.remote_id())
-                            .is_ok_and(|buffer_id| buffer_id == current_buffer.remote_id());
+                        let is_same_file = buffer_id == &current_buffer.remote_id();
 
                         if is_same_file {
                             range_intersection(
@@ -127,8 +123,7 @@ fn scored_snippets(
                         declaration_line_distance_rank,
                         (is_same_file, declaration_line_distance, declaration),
                     )| {
-                        let same_file_declaration_count =
-                            index.read(cx).file_declaration_count(declaration);
+                        let same_file_declaration_count = index.file_declaration_count(declaration);
 
                         score_snippet(
                             &identifier,
@@ -143,7 +138,6 @@ fn scored_snippets(
                             &adjacent_identifier_occurrences,
                             cursor_point,
                             current_buffer,
-                            cx,
                         )
                     },
                 )
@@ -177,7 +171,6 @@ fn score_snippet(
     adjacent_identifier_occurrences: &IdentifierOccurrences,
     cursor: Point,
     current_buffer: &BufferSnapshot,
-    cx: &App,
 ) -> Option<ScoredSnippet> {
     let is_referenced_nearby = references
         .iter()
@@ -195,10 +188,9 @@ fn score_snippet(
         .min()
         .unwrap();
 
-    let item_source_occurrences =
-        IdentifierOccurrences::within_string(&declaration.item_text(cx).0);
+    let item_source_occurrences = IdentifierOccurrences::within_string(&declaration.item_text().0);
     let item_signature_occurrences =
-        IdentifierOccurrences::within_string(&declaration.signature_text(cx).0);
+        IdentifierOccurrences::within_string(&declaration.signature_text().0);
     let containing_range_vs_item_jaccard = jaccard_similarity(
         containing_range_identifier_occurrences,
         &item_source_occurrences,
@@ -285,7 +277,7 @@ impl ScoreInputs {
         // Score related to how likely this is the correct declaration, range 0 to 1
         let accuracy_score = if self.is_same_file {
             // TODO: use declaration_line_distance_rank
-            (0.5 / self.same_file_declaration_count as f32)
+            1.0 / self.same_file_declaration_count as f32
         } else {
             1.0 / self.declaration_count as f32
         };
@@ -307,175 +299,5 @@ impl ScoreInputs {
             // weighted overlap.
             declaration: 2.0 * combined_score * self.containing_range_vs_item_weighted_overlap,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    use gpui::{TestAppContext, prelude::*};
-    use indoc::indoc;
-    use language::{Language, LanguageConfig, LanguageId, LanguageMatcher, tree_sitter_rust};
-    use project::{FakeFs, Project};
-    use serde_json::json;
-    use settings::SettingsStore;
-    use text::ToOffset;
-    use util::path;
-
-    use crate::{EditPredictionExcerptOptions, references_in_excerpt};
-
-    #[gpui::test]
-    async fn test_call_site(cx: &mut TestAppContext) {
-        let (project, index, _rust_lang_id) = init_test(cx).await;
-
-        let buffer = project
-            .update(cx, |project, cx| {
-                let project_path = project.find_project_path("c.rs", cx).unwrap();
-                project.open_buffer(project_path, cx)
-            })
-            .await
-            .unwrap();
-
-        cx.run_until_parked();
-
-        // first process_data call site
-        let cursor_point = language::Point::new(8, 21);
-        let buffer_snapshot = buffer.read_with(cx, |buffer, _| buffer.snapshot());
-        let excerpt = EditPredictionExcerpt::select_from_buffer(
-            cursor_point,
-            &buffer_snapshot,
-            &EditPredictionExcerptOptions {
-                max_bytes: 40,
-                min_bytes: 10,
-                target_before_cursor_over_total_bytes: 0.5,
-                include_parent_signatures: false,
-            },
-        )
-        .unwrap();
-        let excerpt_text = excerpt.text(&buffer_snapshot);
-        let references = references_in_excerpt(&excerpt, &excerpt_text, &buffer_snapshot);
-        let cursor_offset = cursor_point.to_offset(&buffer_snapshot);
-
-        let snippets = cx.update(|cx| {
-            scored_snippets(
-                index,
-                &excerpt,
-                &excerpt_text,
-                references,
-                cursor_offset,
-                &buffer_snapshot,
-                cx,
-            )
-        });
-
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].identifier.name.as_ref(), "process_data");
-        drop(buffer);
-    }
-
-    async fn init_test(
-        cx: &mut TestAppContext,
-    ) -> (Entity<Project>, Entity<SyntaxIndex>, LanguageId) {
-        cx.update(|cx| {
-            let settings_store = SettingsStore::test(cx);
-            cx.set_global(settings_store);
-            language::init(cx);
-            Project::init_settings(cx);
-        });
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(
-            path!("/root"),
-            json!({
-                "a.rs": indoc! {r#"
-                    fn main() {
-                        let x = 1;
-                        let y = 2;
-                        let z = add(x, y);
-                        println!("Result: {}", z);
-                    }
-
-                    fn add(a: i32, b: i32) -> i32 {
-                        a + b
-                    }
-                "#},
-                "b.rs": indoc! {"
-                    pub struct Config {
-                        pub name: String,
-                        pub value: i32,
-                    }
-
-                    impl Config {
-                        pub fn new(name: String, value: i32) -> Self {
-                            Config { name, value }
-                        }
-                    }
-                "},
-                "c.rs": indoc! {r#"
-                    use std::collections::HashMap;
-
-                    fn main() {
-                        let args: Vec<String> = std::env::args().collect();
-                        let data: Vec<i32> = args[1..]
-                            .iter()
-                            .filter_map(|s| s.parse().ok())
-                            .collect();
-                        let result = process_data(data);
-                        println!("{:?}", result);
-                    }
-
-                    fn process_data(data: Vec<i32>) -> HashMap<i32, usize> {
-                        let mut counts = HashMap::new();
-                        for value in data {
-                            *counts.entry(value).or_insert(0) += 1;
-                        }
-                        counts
-                    }
-
-                    #[cfg(test)]
-                    mod tests {
-                        use super::*;
-
-                        #[test]
-                        fn test_process_data() {
-                            let data = vec![1, 2, 2, 3];
-                            let result = process_data(data);
-                            assert_eq!(result.get(&2), Some(&2));
-                        }
-                    }
-                "#}
-            }),
-        )
-        .await;
-        let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
-        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
-        let lang = rust_lang();
-        let lang_id = lang.id();
-        language_registry.add(Arc::new(lang));
-
-        let index = cx.new(|cx| SyntaxIndex::new(&project, cx));
-        cx.run_until_parked();
-
-        (project, index, lang_id)
-    }
-
-    fn rust_lang() -> Language {
-        Language::new(
-            LanguageConfig {
-                name: "Rust".into(),
-                matcher: LanguageMatcher {
-                    path_suffixes: vec!["rs".to_string()],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            Some(tree_sitter_rust::LANGUAGE.into()),
-        )
-        .with_highlights_query(include_str!("../../languages/src/rust/highlights.scm"))
-        .unwrap()
-        .with_outline_query(include_str!("../../languages/src/rust/outline.scm"))
-        .unwrap()
     }
 }

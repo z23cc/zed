@@ -1,10 +1,9 @@
-use gpui::{App, WeakEntity};
-use language::{Buffer, BufferSnapshot, LanguageId};
+use language::LanguageId;
 use project::ProjectEntryId;
 use std::borrow::Cow;
-use std::ops::{Deref, Range};
+use std::ops::Range;
 use std::sync::Arc;
-use text::{Anchor, Bias, OffsetRangeExt, ToOffset};
+use text::{Bias, BufferId, Rope};
 
 use crate::outline::OutlineDeclaration;
 
@@ -25,7 +24,9 @@ pub enum Declaration {
         declaration: FileDeclaration,
     },
     Buffer {
-        buffer: WeakEntity<Buffer>,
+        project_entry_id: ProjectEntryId,
+        buffer_id: BufferId,
+        rope: Rope,
         declaration: BufferDeclaration,
     },
 }
@@ -40,88 +41,79 @@ impl Declaration {
         }
     }
 
-    pub fn project_entry_id(&self, cx: &App) -> Option<ProjectEntryId> {
+    pub fn project_entry_id(&self) -> Option<ProjectEntryId> {
         match self {
             Declaration::File {
                 project_entry_id, ..
             } => Some(*project_entry_id),
-            Declaration::Buffer { buffer, .. } => buffer
-                .read_with(cx, |buffer, _cx| {
-                    project::File::from_dyn(buffer.file())
-                        .and_then(|file| file.project_entry_id(cx))
-                })
-                .ok()
-                .flatten(),
+            Declaration::Buffer {
+                project_entry_id, ..
+            } => Some(*project_entry_id),
         }
     }
 
-    pub fn item_text(&self, cx: &App) -> (Cow<'_, str>, bool) {
+    pub fn item_text(&self) -> (Cow<'_, str>, bool) {
         match self {
             Declaration::File { declaration, .. } => (
                 declaration.text.as_ref().into(),
                 declaration.text_is_truncated,
             ),
             Declaration::Buffer {
-                buffer,
-                declaration,
-            } => buffer
-                .read_with(cx, |buffer, _cx| {
-                    let (range, is_truncated) = expand_range_to_line_boundaries_and_truncate(
-                        &declaration.item_range,
-                        ITEM_TEXT_TRUNCATION_LENGTH,
-                        buffer.deref(),
-                    );
-                    (
-                        buffer.text_for_range(range).collect::<Cow<str>>(),
-                        is_truncated,
-                    )
-                })
-                .unwrap_or_default(),
+                rope, declaration, ..
+            } => {
+                let (range, is_truncated) = expand_range_to_line_boundaries_and_truncate(
+                    &declaration.item_range,
+                    ITEM_TEXT_TRUNCATION_LENGTH,
+                    rope,
+                );
+                (
+                    rope.chunks_in_range(range).collect::<Cow<str>>(),
+                    is_truncated,
+                )
+            }
         }
     }
 
-    pub fn signature_text(&self, cx: &App) -> (Cow<'_, str>, bool) {
+    pub fn signature_text(&self) -> (Cow<'_, str>, bool) {
         match self {
             Declaration::File { declaration, .. } => (
                 declaration.text[declaration.signature_range_in_text.clone()].into(),
                 declaration.signature_is_truncated,
             ),
             Declaration::Buffer {
-                buffer,
-                declaration,
-            } => buffer
-                .read_with(cx, |buffer, _cx| {
-                    let (range, is_truncated) = expand_range_to_line_boundaries_and_truncate(
-                        &declaration.signature_range,
-                        ITEM_TEXT_TRUNCATION_LENGTH,
-                        buffer.deref(),
-                    );
-                    (
-                        buffer.text_for_range(range).collect::<Cow<str>>(),
-                        is_truncated,
-                    )
-                })
-                .unwrap_or_default(),
+                rope, declaration, ..
+            } => {
+                let (range, is_truncated) = expand_range_to_line_boundaries_and_truncate(
+                    &declaration.signature_range,
+                    ITEM_TEXT_TRUNCATION_LENGTH,
+                    rope,
+                );
+                (
+                    rope.chunks_in_range(range).collect::<Cow<str>>(),
+                    is_truncated,
+                )
+            }
         }
     }
 }
 
-fn expand_range_to_line_boundaries_and_truncate<T: ToOffset>(
-    range: &Range<T>,
+fn expand_range_to_line_boundaries_and_truncate(
+    range: &Range<usize>,
     limit: usize,
-    buffer: &text::BufferSnapshot,
+    rope: &Rope,
 ) -> (Range<usize>, bool) {
-    let mut point_range = range.to_point(buffer);
+    let mut point_range = rope.offset_to_point(range.start)..rope.offset_to_point(range.end);
     point_range.start.column = 0;
     point_range.end.row += 1;
     point_range.end.column = 0;
 
-    let mut item_range = point_range.to_offset(buffer);
+    let mut item_range =
+        rope.point_to_offset(point_range.start)..rope.point_to_offset(point_range.end);
     let is_truncated = item_range.len() > limit;
     if is_truncated {
         item_range.end = item_range.start + limit;
     }
-    item_range.end = buffer.clip_offset(item_range.end, Bias::Left);
+    item_range.end = rope.clip_offset(item_range.end, Bias::Left);
     (item_range, is_truncated)
 }
 
@@ -142,14 +134,11 @@ pub struct FileDeclaration {
 }
 
 impl FileDeclaration {
-    pub fn from_outline(
-        declaration: OutlineDeclaration,
-        snapshot: &BufferSnapshot,
-    ) -> FileDeclaration {
+    pub fn from_outline(declaration: OutlineDeclaration, rope: &Rope) -> FileDeclaration {
         let (item_range_in_file, text_is_truncated) = expand_range_to_line_boundaries_and_truncate(
             &declaration.item_range,
             ITEM_TEXT_TRUNCATION_LENGTH,
-            snapshot,
+            rope,
         );
 
         // TODO: consider logging if unexpected
@@ -171,8 +160,8 @@ impl FileDeclaration {
             identifier: declaration.identifier,
             signature_range_in_text: signature_start..signature_end,
             signature_is_truncated,
-            text: snapshot
-                .text_for_range(item_range_in_file.clone())
+            text: rope
+                .chunks_in_range(item_range_in_file.clone())
                 .collect::<String>()
                 .into(),
             text_is_truncated,
@@ -185,21 +174,19 @@ impl FileDeclaration {
 pub struct BufferDeclaration {
     pub parent: Option<DeclarationId>,
     pub identifier: Identifier,
-    pub item_range: Range<Anchor>,
-    pub signature_range: Range<Anchor>,
+    pub item_range: Range<usize>,
+    pub signature_range: Range<usize>,
 }
 
 impl BufferDeclaration {
-    pub fn from_outline(declaration: OutlineDeclaration, snapshot: &BufferSnapshot) -> Self {
+    pub fn from_outline(declaration: OutlineDeclaration) -> Self {
         // use of anchor_before is a guess that the proper behavior is to expand to include
         // insertions immediately before the declaration, but not for insertions immediately after
         Self {
             parent: None,
             identifier: declaration.identifier,
-            item_range: snapshot.anchor_before(declaration.item_range.start)
-                ..snapshot.anchor_before(declaration.item_range.end),
-            signature_range: snapshot.anchor_before(declaration.signature_range.start)
-                ..snapshot.anchor_before(declaration.signature_range.end),
+            item_range: declaration.item_range,
+            signature_range: declaration.signature_range,
         }
     }
 }

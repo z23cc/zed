@@ -1,10 +1,14 @@
+use std::sync::Arc;
+
 use collections::{HashMap, HashSet};
+use futures::lock::Mutex;
 use gpui::{App, AppContext as _, Context, Entity, Task, WeakEntity};
 use language::{Buffer, BufferEvent};
 use project::buffer_store::{BufferStore, BufferStoreEvent};
 use project::worktree_store::{WorktreeStore, WorktreeStoreEvent};
 use project::{PathChange, Project, ProjectEntryId, ProjectPath};
 use slotmap::SlotMap;
+use text::BufferId;
 use util::{ResultExt as _, debug_panic, some_or_debug_panic};
 
 use crate::declaration::{
@@ -15,6 +19,8 @@ use crate::outline::declarations_in_buffer;
 // TODO:
 //
 // * Skip for remote projects
+//
+// * Consider making SyntaxIndex not an Entity.
 
 // Potential future improvements:
 //
@@ -34,13 +40,19 @@ use crate::outline::declarations_in_buffer;
 // * Concurrent slotmap
 //
 // * Use queue for parsing
+//
 
 pub struct SyntaxIndex {
+    state: Arc<Mutex<SyntaxIndexState>>,
+    project: WeakEntity<Project>,
+}
+
+#[derive(Default)]
+pub struct SyntaxIndexState {
     declarations: SlotMap<DeclarationId, Declaration>,
     identifiers: HashMap<Identifier, HashSet<DeclarationId>>,
     files: HashMap<ProjectEntryId, FileState>,
-    buffers: HashMap<WeakEntity<Buffer>, BufferState>,
-    project: WeakEntity<Project>,
+    buffers: HashMap<BufferId, BufferState>,
 }
 
 #[derive(Debug, Default)]
@@ -58,11 +70,8 @@ struct BufferState {
 impl SyntaxIndex {
     pub fn new(project: &Entity<Project>, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
-            declarations: SlotMap::with_key(),
-            identifiers: HashMap::default(),
             project: project.downgrade(),
-            files: HashMap::default(),
-            buffers: HashMap::default(),
+            state: Arc::new(Mutex::new(SyntaxIndexState::default())),
         };
 
         let worktree_store = project.read(cx).worktree_store();
@@ -97,90 +106,6 @@ impl SyntaxIndex {
         this
     }
 
-    pub fn declaration(&self, id: DeclarationId) -> Option<&Declaration> {
-        self.declarations.get(id)
-    }
-
-    pub fn declarations_for_identifier<const N: usize>(
-        &self,
-        identifier: &Identifier,
-        cx: &App,
-    ) -> Vec<Declaration> {
-        // make sure to not have a large stack allocation
-        assert!(N < 32);
-
-        let Some(declaration_ids) = self.identifiers.get(&identifier) else {
-            return vec![];
-        };
-
-        let mut result = Vec::with_capacity(N);
-        let mut included_buffer_entry_ids = arrayvec::ArrayVec::<_, N>::new();
-        let mut file_declarations = Vec::new();
-
-        for declaration_id in declaration_ids {
-            let declaration = self.declarations.get(*declaration_id);
-            let Some(declaration) = some_or_debug_panic(declaration) else {
-                continue;
-            };
-            match declaration {
-                Declaration::Buffer { buffer, .. } => {
-                    if let Ok(Some(entry_id)) = buffer.read_with(cx, |buffer, cx| {
-                        project::File::from_dyn(buffer.file()).and_then(|f| f.project_entry_id(cx))
-                    }) {
-                        included_buffer_entry_ids.push(entry_id);
-                        result.push(declaration.clone());
-                        if result.len() == N {
-                            return result;
-                        }
-                    }
-                }
-                Declaration::File {
-                    project_entry_id, ..
-                } => {
-                    if !included_buffer_entry_ids.contains(project_entry_id) {
-                        file_declarations.push(declaration.clone());
-                    }
-                }
-            }
-        }
-
-        for declaration in file_declarations {
-            match declaration {
-                Declaration::File {
-                    project_entry_id, ..
-                } => {
-                    if !included_buffer_entry_ids.contains(&project_entry_id) {
-                        result.push(declaration);
-
-                        if result.len() == N {
-                            return result;
-                        }
-                    }
-                }
-                Declaration::Buffer { .. } => {}
-            }
-        }
-
-        result
-    }
-
-    pub fn file_declaration_count(&self, declaration: &Declaration) -> usize {
-        match declaration {
-            Declaration::File {
-                project_entry_id, ..
-            } => self
-                .files
-                .get(project_entry_id)
-                .map(|file_state| file_state.declarations.len())
-                .unwrap_or_default(),
-            Declaration::Buffer { buffer, .. } => self
-                .buffers
-                .get(buffer)
-                .map(|buffer_state| buffer_state.declarations.len())
-                .unwrap_or_default(),
-        }
-    }
-
     fn handle_worktree_store_event(
         &mut self,
         _worktree_store: Entity<WorktreeStore>,
@@ -190,21 +115,33 @@ impl SyntaxIndex {
         use WorktreeStoreEvent::*;
         match event {
             WorktreeUpdatedEntries(worktree_id, updated_entries_set) => {
-                for (path, entry_id, path_change) in updated_entries_set.iter() {
-                    if let PathChange::Removed = path_change {
-                        self.files.remove(entry_id);
-                    } else {
-                        let project_path = ProjectPath {
-                            worktree_id: *worktree_id,
-                            path: path.clone(),
-                        };
-                        self.update_file(*entry_id, project_path, cx);
+                let state = Arc::downgrade(&self.state);
+                let worktree_id = *worktree_id;
+                let updated_entries_set = updated_entries_set.clone();
+                cx.spawn(async move |this, cx| {
+                    let Some(state) = state.upgrade() else { return };
+                    for (path, entry_id, path_change) in updated_entries_set.iter() {
+                        if let PathChange::Removed = path_change {
+                            state.lock().await.files.remove(entry_id);
+                        } else {
+                            let project_path = ProjectPath {
+                                worktree_id,
+                                path: path.clone(),
+                            };
+                            this.update(cx, |this, cx| {
+                                this.update_file(*entry_id, project_path, cx);
+                            })
+                            .ok();
+                        }
                     }
-                }
+                })
+                .detach();
             }
             WorktreeDeletedEntry(_worktree_id, project_entry_id) => {
-                // TODO: Is this needed?
-                self.files.remove(project_entry_id);
+                let project_entry_id = *project_entry_id;
+                self.with_state(cx, move |state| {
+                    state.files.remove(&project_entry_id);
+                })
             }
             _ => {}
         }
@@ -226,15 +163,42 @@ impl SyntaxIndex {
         }
     }
 
+    pub fn state(&self) -> &Arc<Mutex<SyntaxIndexState>> {
+        &self.state
+    }
+
+    fn with_state(&self, cx: &mut App, f: impl FnOnce(&mut SyntaxIndexState) + Send + 'static) {
+        if let Some(mut state) = self.state.try_lock() {
+            f(&mut state);
+            return;
+        }
+        let state = Arc::downgrade(&self.state);
+        cx.background_spawn(async move {
+            let Some(state) = state.upgrade() else {
+                return None;
+            };
+            let mut state = state.lock().await;
+            Some(f(&mut state))
+        })
+        .detach();
+    }
+
     fn register_buffer(&mut self, buffer: &Entity<Buffer>, cx: &mut Context<Self>) {
-        self.buffers
-            .insert(buffer.downgrade(), BufferState::default());
-        let weak_buf = buffer.downgrade();
-        cx.observe_release(buffer, move |this, _buffer, _cx| {
-            this.buffers.remove(&weak_buf);
+        let buffer_id = buffer.read(cx).remote_id();
+        cx.observe_release(buffer, move |this, _buffer, cx| {
+            this.with_state(cx, move |state| {
+                if let Some(buffer_state) = state.buffers.remove(&buffer_id) {
+                    SyntaxIndexState::remove_buffer_declarations(
+                        &buffer_state.declarations,
+                        &mut state.declarations,
+                        &mut state.identifiers,
+                    );
+                }
+            })
         })
         .detach();
         cx.subscribe(buffer, Self::handle_buffer_event).detach();
+
         self.update_buffer(buffer.clone(), cx);
     }
 
@@ -250,10 +214,19 @@ impl SyntaxIndex {
         }
     }
 
-    fn update_buffer(&mut self, buffer: Entity<Buffer>, cx: &Context<Self>) {
-        let mut parse_status = buffer.read(cx).parse_status();
+    fn update_buffer(&mut self, buffer_entity: Entity<Buffer>, cx: &mut Context<Self>) {
+        let buffer = buffer_entity.read(cx);
+
+        let Some(project_entry_id) =
+            project::File::from_dyn(buffer.file()).and_then(|f| f.project_entry_id(cx))
+        else {
+            return;
+        };
+        let buffer_id = buffer.remote_id();
+
+        let mut parse_status = buffer.parse_status();
         let snapshot_task = cx.spawn({
-            let weak_buffer = buffer.downgrade();
+            let weak_buffer = buffer_entity.downgrade();
             async move |_, cx| {
                 while *parse_status.borrow() != language::ParseStatus::Idle {
                     parse_status.changed().await?;
@@ -264,75 +237,72 @@ impl SyntaxIndex {
 
         let parse_task = cx.background_spawn(async move {
             let snapshot = snapshot_task.await?;
+            let rope = snapshot.text.as_rope().clone();
 
-            anyhow::Ok(
+            anyhow::Ok((
+                rope,
                 declarations_in_buffer(&snapshot)
                     .into_iter()
-                    .map(|item| {
-                        (
-                            item.parent_index,
-                            BufferDeclaration::from_outline(item, &snapshot),
-                        )
-                    })
+                    .map(|item| (item.parent_index, BufferDeclaration::from_outline(item)))
                     .collect::<Vec<_>>(),
-            )
+            ))
         });
 
         let task = cx.spawn({
-            let weak_buffer = buffer.downgrade();
             async move |this, cx| {
-                let Ok(declarations) = parse_task.await else {
+                let Ok((rope, declarations)) = parse_task.await else {
                     return;
                 };
 
-                this.update(cx, |this, _cx| {
-                    let buffer_state = this
-                        .buffers
-                        .entry(weak_buffer.clone())
-                        .or_insert_with(Default::default);
+                this.update(cx, move |this, cx| {
+                    this.with_state(cx, move |state| {
+                        let buffer_state = state
+                            .buffers
+                            .entry(buffer_id)
+                            .or_insert_with(Default::default);
 
-                    for old_declaration_id in &buffer_state.declarations {
-                        let Some(declaration) = this.declarations.remove(*old_declaration_id)
-                        else {
-                            debug_panic!("declaration not found");
-                            continue;
-                        };
-                        if let Some(identifier_declarations) =
-                            this.identifiers.get_mut(declaration.identifier())
-                        {
-                            identifier_declarations.remove(old_declaration_id);
+                        SyntaxIndexState::remove_buffer_declarations(
+                            &buffer_state.declarations,
+                            &mut state.declarations,
+                            &mut state.identifiers,
+                        );
+
+                        let mut new_ids = Vec::with_capacity(declarations.len());
+                        state.declarations.reserve(declarations.len());
+                        for (parent_index, mut declaration) in declarations {
+                            declaration.parent = parent_index
+                                .and_then(|ix| some_or_debug_panic(new_ids.get(ix).copied()));
+
+                            let identifier = declaration.identifier.clone();
+                            let declaration_id = state.declarations.insert(Declaration::Buffer {
+                                rope: rope.clone(),
+                                buffer_id,
+                                declaration,
+                                project_entry_id,
+                            });
+                            new_ids.push(declaration_id);
+
+                            state
+                                .identifiers
+                                .entry(identifier)
+                                .or_default()
+                                .insert(declaration_id);
                         }
-                    }
 
-                    let mut new_ids = Vec::with_capacity(declarations.len());
-                    this.declarations.reserve(declarations.len());
-                    for (parent_index, mut declaration) in declarations {
-                        declaration.parent = parent_index
-                            .and_then(|ix| some_or_debug_panic(new_ids.get(ix).copied()));
-
-                        let identifier = declaration.identifier.clone();
-                        let declaration_id = this.declarations.insert(Declaration::Buffer {
-                            buffer: weak_buffer.clone(),
-                            declaration,
-                        });
-                        new_ids.push(declaration_id);
-
-                        this.identifiers
-                            .entry(identifier)
-                            .or_default()
-                            .insert(declaration_id);
-                    }
-
-                    buffer_state.declarations = new_ids;
+                        buffer_state.declarations = new_ids;
+                    });
                 })
                 .ok();
             }
         });
 
-        self.buffers
-            .entry(buffer.downgrade())
-            .or_insert_with(Default::default)
-            .task = Some(task);
+        self.with_state(cx, move |state| {
+            state
+                .buffers
+                .entry(buffer_id)
+                .or_insert_with(Default::default)
+                .task = Some(task)
+        });
     }
 
     fn update_file(
@@ -376,14 +346,10 @@ impl SyntaxIndex {
 
         let parse_task = cx.background_spawn(async move {
             let snapshot = snapshot_task.await?;
+            let rope = snapshot.as_rope();
             let declarations = declarations_in_buffer(&snapshot)
                 .into_iter()
-                .map(|item| {
-                    (
-                        item.parent_index,
-                        FileDeclaration::from_outline(item, &snapshot),
-                    )
-                })
+                .map(|item| (item.parent_index, FileDeclaration::from_outline(item, rope)))
                 .collect::<Vec<_>>();
             anyhow::Ok(declarations)
         });
@@ -394,52 +360,158 @@ impl SyntaxIndex {
                 let Ok(declarations) = parse_task.await else {
                     return;
                 };
-                this.update(cx, |this, _cx| {
-                    let file_state = this.files.entry(entry_id).or_insert_with(Default::default);
+                this.update(cx, |this, cx| {
+                    this.with_state(cx, move |state| {
+                        let file_state =
+                            state.files.entry(entry_id).or_insert_with(Default::default);
 
-                    for old_declaration_id in &file_state.declarations {
-                        let Some(declaration) = this.declarations.remove(*old_declaration_id)
-                        else {
-                            debug_panic!("declaration not found");
-                            continue;
-                        };
-                        if let Some(identifier_declarations) =
-                            this.identifiers.get_mut(declaration.identifier())
-                        {
-                            identifier_declarations.remove(old_declaration_id);
+                        for old_declaration_id in &file_state.declarations {
+                            let Some(declaration) = state.declarations.remove(*old_declaration_id)
+                            else {
+                                debug_panic!("declaration not found");
+                                continue;
+                            };
+                            if let Some(identifier_declarations) =
+                                state.identifiers.get_mut(declaration.identifier())
+                            {
+                                identifier_declarations.remove(old_declaration_id);
+                            }
                         }
-                    }
 
-                    let mut new_ids = Vec::with_capacity(declarations.len());
-                    this.declarations.reserve(declarations.len());
+                        let mut new_ids = Vec::with_capacity(declarations.len());
+                        state.declarations.reserve(declarations.len());
 
-                    for (parent_index, mut declaration) in declarations {
-                        declaration.parent = parent_index
-                            .and_then(|ix| some_or_debug_panic(new_ids.get(ix).copied()));
+                        for (parent_index, mut declaration) in declarations {
+                            declaration.parent = parent_index
+                                .and_then(|ix| some_or_debug_panic(new_ids.get(ix).copied()));
 
-                        let identifier = declaration.identifier.clone();
-                        let declaration_id = this.declarations.insert(Declaration::File {
-                            project_entry_id: entry_id,
-                            declaration,
-                        });
-                        new_ids.push(declaration_id);
+                            let identifier = declaration.identifier.clone();
+                            let declaration_id = state.declarations.insert(Declaration::File {
+                                project_entry_id: entry_id,
+                                declaration,
+                            });
+                            new_ids.push(declaration_id);
 
-                        this.identifiers
-                            .entry(identifier)
-                            .or_default()
-                            .insert(declaration_id);
-                    }
+                            state
+                                .identifiers
+                                .entry(identifier)
+                                .or_default()
+                                .insert(declaration_id);
+                        }
 
-                    file_state.declarations = new_ids;
+                        file_state.declarations = new_ids;
+                    });
                 })
                 .ok();
             }
         });
 
-        self.files
-            .entry(entry_id)
-            .or_insert_with(Default::default)
-            .task = Some(task);
+        self.with_state(cx, move |state| {
+            state
+                .files
+                .entry(entry_id)
+                .or_insert_with(Default::default)
+                .task = Some(task);
+        });
+    }
+}
+
+impl SyntaxIndexState {
+    pub fn declaration(&self, id: DeclarationId) -> Option<&Declaration> {
+        self.declarations.get(id)
+    }
+
+    pub fn declarations_for_identifier<const N: usize>(
+        &self,
+        identifier: &Identifier,
+    ) -> Vec<Declaration> {
+        // make sure to not have a large stack allocation
+        assert!(N < 32);
+
+        let Some(declaration_ids) = self.identifiers.get(&identifier) else {
+            return vec![];
+        };
+
+        let mut result = Vec::with_capacity(N);
+        let mut included_buffer_entry_ids = arrayvec::ArrayVec::<_, N>::new();
+        let mut file_declarations = Vec::new();
+
+        for declaration_id in declaration_ids {
+            let declaration = self.declarations.get(*declaration_id);
+            let Some(declaration) = some_or_debug_panic(declaration) else {
+                continue;
+            };
+            match declaration {
+                Declaration::Buffer {
+                    project_entry_id, ..
+                } => {
+                    included_buffer_entry_ids.push(*project_entry_id);
+                    result.push(declaration.clone());
+                    if result.len() == N {
+                        return result;
+                    }
+                }
+                Declaration::File {
+                    project_entry_id, ..
+                } => {
+                    if !included_buffer_entry_ids.contains(&project_entry_id) {
+                        file_declarations.push(declaration.clone());
+                    }
+                }
+            }
+        }
+
+        for declaration in file_declarations {
+            match declaration {
+                Declaration::File {
+                    project_entry_id, ..
+                } => {
+                    if !included_buffer_entry_ids.contains(&project_entry_id) {
+                        result.push(declaration);
+
+                        if result.len() == N {
+                            return result;
+                        }
+                    }
+                }
+                Declaration::Buffer { .. } => {}
+            }
+        }
+
+        result
+    }
+
+    pub fn file_declaration_count(&self, declaration: &Declaration) -> usize {
+        match declaration {
+            Declaration::File {
+                project_entry_id, ..
+            } => self
+                .files
+                .get(project_entry_id)
+                .map(|file_state| file_state.declarations.len())
+                .unwrap_or_default(),
+            Declaration::Buffer { buffer_id, .. } => self
+                .buffers
+                .get(buffer_id)
+                .map(|buffer_state| buffer_state.declarations.len())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn remove_buffer_declarations(
+        old_declaration_ids: &[DeclarationId],
+        declarations: &mut SlotMap<DeclarationId, Declaration>,
+        identifiers: &mut HashMap<Identifier, HashSet<DeclarationId>>,
+    ) {
+        for old_declaration_id in old_declaration_ids {
+            let Some(declaration) = declarations.remove(*old_declaration_id) else {
+                debug_panic!("declaration not found");
+                continue;
+            };
+            if let Some(identifier_declarations) = identifiers.get_mut(declaration.identifier()) {
+                identifier_declarations.remove(old_declaration_id);
+            }
+        }
     }
 }
 
@@ -448,11 +520,10 @@ mod tests {
     use super::*;
     use std::{path::Path, sync::Arc};
 
-    use futures::channel::oneshot;
     use gpui::TestAppContext;
     use indoc::indoc;
     use language::{Language, LanguageConfig, LanguageId, LanguageMatcher, tree_sitter_rust};
-    use project::{FakeFs, Project, ProjectItem};
+    use project::{FakeFs, Project};
     use serde_json::json;
     use settings::SettingsStore;
     use text::OffsetRangeExt as _;
@@ -468,8 +539,10 @@ mod tests {
             language_id: rust_lang_id,
         };
 
-        index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(&main, cx);
+        let index_state = index.read_with(cx, |index, _cx| index.state().clone());
+        let index_state = index_state.lock().await;
+        cx.update(|cx| {
+            let decls = index_state.declarations_for_identifier::<8>(&main);
             assert_eq!(decls.len(), 2);
 
             let decl = expect_file_decl("c.rs", &decls[0], &project, cx);
@@ -490,15 +563,17 @@ mod tests {
             language_id: rust_lang_id,
         };
 
-        index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(&test_process_data, cx);
+        let index_state = index.read_with(cx, |index, _cx| index.state().clone());
+        let index_state = index_state.lock().await;
+        cx.update(|cx| {
+            let decls = index_state.declarations_for_identifier::<8>(&test_process_data);
             assert_eq!(decls.len(), 1);
 
             let decl = expect_file_decl("c.rs", &decls[0], &project, cx);
             assert_eq!(decl.identifier, test_process_data);
 
             let parent_id = decl.parent.unwrap();
-            let parent = index.declaration(parent_id).unwrap();
+            let parent = index_state.declaration(parent_id).unwrap();
             let parent_decl = expect_file_decl("c.rs", &parent, &project, cx);
             assert_eq!(
                 parent_decl.identifier,
@@ -529,16 +604,18 @@ mod tests {
 
         cx.run_until_parked();
 
-        index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(&test_process_data, cx);
+        let index_state = index.read_with(cx, |index, _cx| index.state().clone());
+        let index_state = index_state.lock().await;
+        cx.update(|cx| {
+            let decls = index_state.declarations_for_identifier::<8>(&test_process_data);
             assert_eq!(decls.len(), 1);
 
-            let decl = expect_buffer_decl("c.rs", &decls[0], cx);
+            let decl = expect_buffer_decl("c.rs", &decls[0], &project, cx);
             assert_eq!(decl.identifier, test_process_data);
 
             let parent_id = decl.parent.unwrap();
-            let parent = index.declaration(parent_id).unwrap();
-            let parent_decl = expect_buffer_decl("c.rs", &parent, cx);
+            let parent = index_state.declaration(parent_id).unwrap();
+            let parent_decl = expect_buffer_decl("c.rs", &parent, &project, cx);
             assert_eq!(
                 parent_decl.identifier,
                 Identifier {
@@ -556,16 +633,13 @@ mod tests {
     async fn test_declarations_limt(cx: &mut TestAppContext) {
         let (_, index, rust_lang_id) = init_test(cx).await;
 
-        index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<1>(
-                &Identifier {
-                    name: "main".into(),
-                    language_id: rust_lang_id,
-                },
-                cx,
-            );
-            assert_eq!(decls.len(), 1);
+        let index_state = index.read_with(cx, |index, _cx| index.state().clone());
+        let index_state = index_state.lock().await;
+        let decls = index_state.declarations_for_identifier::<1>(&Identifier {
+            name: "main".into(),
+            language_id: rust_lang_id,
         });
+        assert_eq!(decls.len(), 1);
     }
 
     #[gpui::test]
@@ -587,31 +661,31 @@ mod tests {
 
         cx.run_until_parked();
 
-        index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(&main, cx);
-            assert_eq!(decls.len(), 2);
-            let decl = expect_buffer_decl("c.rs", &decls[0], cx);
-            assert_eq!(decl.identifier, main);
-            assert_eq!(decl.item_range.to_offset(&buffer.read(cx)), 32..279);
+        let index_state_arc = index.read_with(cx, |index, _cx| index.state().clone());
+        {
+            let index_state = index_state_arc.lock().await;
 
-            expect_file_decl("a.rs", &decls[1], &project, cx);
-        });
+            cx.update(|cx| {
+                let decls = index_state.declarations_for_identifier::<8>(&main);
+                assert_eq!(decls.len(), 2);
+                let decl = expect_buffer_decl("c.rs", &decls[0], &project, cx);
+                assert_eq!(decl.identifier, main);
+                assert_eq!(decl.item_range.to_offset(&buffer.read(cx)), 32..279);
+
+                expect_file_decl("a.rs", &decls[1], &project, cx);
+            });
+        }
 
         // Drop the buffer and wait for release
-        let (release_tx, release_rx) = oneshot::channel();
-        cx.update(|cx| {
-            cx.observe_release(&buffer, |_, _| {
-                release_tx.send(()).ok();
-            })
-            .detach();
+        cx.update(|_| {
+            drop(buffer);
         });
-        drop(buffer);
-        cx.run_until_parked();
-        release_rx.await.ok();
         cx.run_until_parked();
 
-        index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(&main, cx);
+        let index_state = index_state_arc.lock().await;
+
+        cx.update(|cx| {
+            let decls = index_state.declarations_for_identifier::<8>(&main);
             assert_eq!(decls.len(), 2);
             expect_file_decl("c.rs", &decls[0], &project, cx);
             expect_file_decl("a.rs", &decls[1], &project, cx);
@@ -621,24 +695,20 @@ mod tests {
     fn expect_buffer_decl<'a>(
         path: &str,
         declaration: &'a Declaration,
+        project: &Entity<Project>,
         cx: &App,
     ) -> &'a BufferDeclaration {
         if let Declaration::Buffer {
             declaration,
-            buffer,
+            project_entry_id,
+            ..
         } = declaration
         {
-            assert_eq!(
-                buffer
-                    .upgrade()
-                    .unwrap()
-                    .read(cx)
-                    .project_path(cx)
-                    .unwrap()
-                    .path
-                    .as_ref(),
-                Path::new(path),
-            );
+            let project_path = project
+                .read(cx)
+                .path_for_entry(*project_entry_id, cx)
+                .unwrap();
+            assert_eq!(project_path.path.as_ref(), Path::new(path),);
             declaration
         } else {
             panic!("Expected a buffer declaration, found {:?}", declaration);

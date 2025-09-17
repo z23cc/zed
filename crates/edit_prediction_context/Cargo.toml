@@ -19,7 +19,9 @@ path = "examples/zeta_context.rs"
 anyhow.workspace = true
 arrayvec.workspace = true
 collections.workspace = true
+futures.workspace = true
 gpui.workspace = true
+itertools.workspace = true
 language.workspace = true
 log.workspace = true
 project.workspace = true
@@ -31,7 +33,6 @@ text.workspace = true
 tree-sitter.workspace = true
 util.workspace = true
 workspace-hack.workspace = true
-itertools.workspace = true
 
 [dev-dependencies]
 clap.workspace = true
