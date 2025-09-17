@@ -1,10 +1,12 @@
+mod declaration;
+mod declaration_scoring;
 mod excerpt;
 mod outline;
 mod reference;
-mod scored_declaration;
+mod syntax_index;
 mod text_similarity;
-mod tree_sitter_index;
 
+pub use declaration::{BufferDeclaration, Declaration, FileDeclaration, Identifier};
 pub use excerpt::{EditPredictionExcerpt, EditPredictionExcerptOptions, EditPredictionExcerptText};
 pub use reference::references_in_excerpt;
-pub use tree_sitter_index::{BufferDeclaration, Declaration, FileDeclaration, TreeSitterIndex};
+pub use syntax_index::SyntaxIndex;

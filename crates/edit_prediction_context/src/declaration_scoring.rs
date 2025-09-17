@@ -1,16 +1,13 @@
-use collections::HashSet;
 use gpui::{App, Entity};
 use itertools::Itertools as _;
 use language::BufferSnapshot;
-use project::ProjectEntryId;
 use serde::Serialize;
 use std::{collections::HashMap, ops::Range};
 use strum::EnumIter;
 use text::{OffsetRangeExt, Point, ToPoint};
 
 use crate::{
-    Declaration, EditPredictionExcerpt, EditPredictionExcerptText, TreeSitterIndex,
-    outline::Identifier,
+    Declaration, EditPredictionExcerpt, EditPredictionExcerptText, Identifier, SyntaxIndex,
     reference::{Reference, ReferenceRegion},
     text_similarity::{IdentifierOccurrences, jaccard_similarity, weighted_overlap_coefficient},
 };
@@ -54,7 +51,7 @@ impl ScoredSnippet {
 }
 
 fn scored_snippets(
-    index: Entity<TreeSitterIndex>,
+    index: Entity<SyntaxIndex>,
     excerpt: &EditPredictionExcerpt,
     excerpt_text: &EditPredictionExcerptText,
     identifier_to_references: HashMap<Identifier, Vec<Reference>>,
@@ -66,10 +63,6 @@ fn scored_snippets(
         IdentifierOccurrences::within_string(&excerpt_text.body);
     let cursor_point = cursor_offset.to_point(&current_buffer);
 
-    // todo! ask michael why we needed this
-    // if let Some(cursor_within_excerpt) = cursor_offset.checked_sub(excerpt.range.start) {
-    // } else {
-    // };
     let start_point = Point::new(cursor_point.row.saturating_sub(2), 0);
     let end_point = Point::new(cursor_point.row + 1, 0);
     let adjacent_identifier_occurrences = IdentifierOccurrences::within_string(
@@ -91,7 +84,7 @@ fn scored_snippets(
                 .iter()
                 .filter_map(|declaration| match declaration {
                     Declaration::Buffer {
-                        declaration,
+                        declaration: buffer_declaration,
                         buffer,
                     } => {
                         let is_same_file = buffer
@@ -100,13 +93,16 @@ fn scored_snippets(
 
                         if is_same_file {
                             range_intersection(
-                                &declaration.item_range.to_offset(&current_buffer),
+                                &buffer_declaration.item_range.to_offset(&current_buffer),
                                 &excerpt.range,
                             )
                             .is_none()
                             .then(|| {
-                                let declaration_line =
-                                    declaration.item_range.start.to_point(current_buffer).row;
+                                let declaration_line = buffer_declaration
+                                    .item_range
+                                    .start
+                                    .to_point(current_buffer)
+                                    .row;
                                 (
                                     true,
                                     (cursor_point.row as i32 - declaration_line as i32).abs()
@@ -120,7 +116,7 @@ fn scored_snippets(
                     }
                     Declaration::File { .. } => {
                         // We can assume that a file declaration is in a different file,
-                        // because the current onemust be open
+                        // because the current one must be open
                         Some((false, 0, declaration))
                     }
                 })
@@ -199,9 +195,10 @@ fn score_snippet(
         .min()
         .unwrap();
 
-    let item_source_occurrences = IdentifierOccurrences::within_string(&declaration.item_text(cx));
+    let item_source_occurrences =
+        IdentifierOccurrences::within_string(&declaration.item_text(cx).0);
     let item_signature_occurrences =
-        IdentifierOccurrences::within_string(&declaration.signature_text(cx));
+        IdentifierOccurrences::within_string(&declaration.signature_text(cx).0);
     let containing_range_vs_item_jaccard = jaccard_similarity(
         containing_range_identifier_occurrences,
         &item_source_occurrences,
@@ -327,9 +324,7 @@ mod tests {
     use text::ToOffset;
     use util::path;
 
-    use crate::{
-        EditPredictionExcerptOptions, references_in_excerpt, tree_sitter_index::TreeSitterIndex,
-    };
+    use crate::{EditPredictionExcerptOptions, references_in_excerpt};
 
     #[gpui::test]
     async fn test_call_site(cx: &mut TestAppContext) {
@@ -382,7 +377,7 @@ mod tests {
 
     async fn init_test(
         cx: &mut TestAppContext,
-    ) -> (Entity<Project>, Entity<TreeSitterIndex>, LanguageId) {
+    ) -> (Entity<Project>, Entity<SyntaxIndex>, LanguageId) {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
@@ -460,7 +455,7 @@ mod tests {
         let lang_id = lang.id();
         language_registry.add(Arc::new(lang));
 
-        let index = cx.new(|cx| TreeSitterIndex::new(&project, cx));
+        let index = cx.new(|cx| SyntaxIndex::new(&project, cx));
         cx.run_until_parked();
 
         (project, index, lang_id)
