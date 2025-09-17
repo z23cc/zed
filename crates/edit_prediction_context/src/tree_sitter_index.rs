@@ -78,6 +78,57 @@ impl Declaration {
             Declaration::Buffer { declaration, .. } => &declaration.identifier,
         }
     }
+
+    pub fn project_entry_id(&self, cx: &App) -> Option<ProjectEntryId> {
+        match self {
+            Declaration::File {
+                project_entry_id, ..
+            } => Some(*project_entry_id),
+            Declaration::Buffer { buffer, .. } => buffer
+                .read_with(cx, |buffer, _cx| {
+                    project::File::from_dyn(buffer.file())
+                        .and_then(|file| file.project_entry_id(cx))
+                })
+                .ok()
+                .flatten(),
+        }
+    }
+
+    // todo! pick best return type
+    pub fn item_text(&self, cx: &App) -> Arc<str> {
+        match self {
+            Declaration::File { declaration, .. } => declaration.declaration_text.clone(),
+            Declaration::Buffer {
+                buffer,
+                declaration,
+            } => buffer
+                .read_with(cx, |buffer, _cx| {
+                    buffer
+                        .text_for_range(declaration.item_range.clone())
+                        .collect::<String>()
+                        .into()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    // todo! pick best return type
+    pub fn signature_text(&self, cx: &App) -> Arc<str> {
+        match self {
+            Declaration::File { declaration, .. } => declaration.signature_text.clone(),
+            Declaration::Buffer {
+                buffer,
+                declaration,
+            } => buffer
+                .read_with(cx, |buffer, _cx| {
+                    buffer
+                        .text_for_range(declaration.signature_range.clone())
+                        .collect::<String>()
+                        .into()
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +137,9 @@ pub struct FileDeclaration {
     pub identifier: Identifier,
     pub item_range: Range<usize>,
     pub signature_range: Range<usize>,
+    // todo! should we just store a range with the declaration text?
     pub signature_text: Arc<str>,
+    pub declaration_text: Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +198,7 @@ impl TreeSitterIndex {
 
     pub fn declarations_for_identifier<const N: usize>(
         &self,
-        identifier: Identifier,
+        identifier: &Identifier,
         cx: &App,
     ) -> Vec<Declaration> {
         // make sure to not have a large stack allocation
@@ -204,6 +257,23 @@ impl TreeSitterIndex {
         }
 
         result
+    }
+
+    pub fn file_declaration_count(&self, declaration: &Declaration) -> usize {
+        match declaration {
+            Declaration::File {
+                project_entry_id, ..
+            } => self
+                .files
+                .get(project_entry_id)
+                .map(|file_state| file_state.declarations.len())
+                .unwrap_or_default(),
+            Declaration::Buffer { buffer, .. } => self
+                .buffers
+                .get(buffer)
+                .map(|buffer_state| buffer_state.declarations.len())
+                .unwrap_or_default(),
+        }
     }
 
     fn handle_worktree_store_event(
@@ -491,12 +561,16 @@ impl FileDeclaration {
         FileDeclaration {
             parent: None,
             identifier: declaration.identifier,
-            item_range: declaration.item_range,
             signature_text: snapshot
                 .text_for_range(declaration.signature_range.clone())
                 .collect::<String>()
                 .into(),
             signature_range: declaration.signature_range,
+            declaration_text: snapshot
+                .text_for_range(declaration.item_range.clone())
+                .collect::<String>()
+                .into(),
+            item_range: declaration.item_range,
         }
     }
 }
@@ -527,7 +601,7 @@ mod tests {
         };
 
         index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(main.clone(), cx);
+            let decls = index.declarations_for_identifier::<8>(&main, cx);
             assert_eq!(decls.len(), 2);
 
             let decl = expect_file_decl("c.rs", &decls[0], &project, cx);
@@ -549,7 +623,7 @@ mod tests {
         };
 
         index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(test_process_data.clone(), cx);
+            let decls = index.declarations_for_identifier::<8>(&test_process_data, cx);
             assert_eq!(decls.len(), 1);
 
             let decl = expect_file_decl("c.rs", &decls[0], &project, cx);
@@ -588,7 +662,7 @@ mod tests {
         cx.run_until_parked();
 
         index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(test_process_data.clone(), cx);
+            let decls = index.declarations_for_identifier::<8>(&test_process_data, cx);
             assert_eq!(decls.len(), 1);
 
             let decl = expect_buffer_decl("c.rs", &decls[0], cx);
@@ -616,7 +690,7 @@ mod tests {
 
         index.read_with(cx, |index, cx| {
             let decls = index.declarations_for_identifier::<1>(
-                Identifier {
+                &Identifier {
                     name: "main".into(),
                     language_id: rust_lang_id,
                 },
@@ -646,7 +720,7 @@ mod tests {
         cx.run_until_parked();
 
         index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(main.clone(), cx);
+            let decls = index.declarations_for_identifier::<8>(&main, cx);
             assert_eq!(decls.len(), 2);
             let decl = expect_buffer_decl("c.rs", &decls[0], cx);
             assert_eq!(decl.identifier, main);
@@ -669,7 +743,7 @@ mod tests {
         cx.run_until_parked();
 
         index.read_with(cx, |index, cx| {
-            let decls = index.declarations_for_identifier::<8>(main, cx);
+            let decls = index.declarations_for_identifier::<8>(&main, cx);
             assert_eq!(decls.len(), 2);
             expect_file_decl("c.rs", &decls[0], &project, cx);
             expect_file_decl("a.rs", &decls[1], &project, cx);
