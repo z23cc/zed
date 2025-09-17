@@ -1,6 +1,7 @@
 mod excerpt;
 mod outline;
 mod reference;
+mod text_similarity;
 mod tree_sitter_index;
 
 pub use excerpt::{EditPredictionExcerpt, EditPredictionExcerptOptions, EditPredictionExcerptText};
