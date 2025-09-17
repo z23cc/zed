@@ -15,6 +15,10 @@ use crate::{
     text_similarity::{IdentifierOccurrences, jaccard_similarity, weighted_overlap_coefficient},
 };
 
+// TODO:
+//
+// * Consider adding declaration_file_count (n)
+
 #[derive(Clone, Debug)]
 pub struct ScoredSnippet {
     #[allow(dead_code)]
@@ -28,7 +32,7 @@ pub struct ScoredSnippet {
 #[derive(EnumIter, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum SnippetStyle {
     Signature,
-    Definition,
+    Declaration,
 }
 
 impl ScoredSnippet {
@@ -36,7 +40,7 @@ impl ScoredSnippet {
     pub fn score(&self, style: SnippetStyle) -> f32 {
         match style {
             SnippetStyle::Signature => self.scores.signature,
-            SnippetStyle::Definition => self.scores.definition,
+            SnippetStyle::Declaration => self.scores.declaration,
         }
     }
 
@@ -77,20 +81,15 @@ fn scored_snippets(
     identifier_to_references
         .into_iter()
         .flat_map(|(identifier, references)| {
-            let definitions = index
+            let declarations = index
                 .read(cx)
                 // todo! pick a limit
                 .declarations_for_identifier::<16>(&identifier, cx);
-            let definition_count = definitions.len();
-            let total_file_count = definitions
-                .iter()
-                .filter_map(|definition| definition.project_entry_id(cx))
-                .collect::<HashSet<ProjectEntryId>>()
-                .len();
+            let declaration_count = declarations.len();
 
-            definitions
+            declarations
                 .iter()
-                .filter_map(|definition| match definition {
+                .filter_map(|declaration| match declaration {
                     Declaration::Buffer {
                         declaration,
                         buffer,
@@ -106,44 +105,44 @@ fn scored_snippets(
                             )
                             .is_none()
                             .then(|| {
-                                let definition_line =
+                                let declaration_line =
                                     declaration.item_range.start.to_point(current_buffer).row;
                                 (
                                     true,
-                                    (cursor_point.row as i32 - definition_line as i32).abs() as u32,
-                                    definition,
+                                    (cursor_point.row as i32 - declaration_line as i32).abs()
+                                        as u32,
+                                    declaration,
                                 )
                             })
                         } else {
-                            Some((false, 0, definition))
+                            Some((false, 0, declaration))
                         }
                     }
                     Declaration::File { .. } => {
                         // We can assume that a file declaration is in a different file,
                         // because the current onemust be open
-                        Some((false, 0, definition))
+                        Some((false, 0, declaration))
                     }
                 })
                 .sorted_by_key(|&(_, distance, _)| distance)
                 .enumerate()
                 .map(
                     |(
-                        definition_line_distance_rank,
-                        (is_same_file, definition_line_distance, definition),
+                        declaration_line_distance_rank,
+                        (is_same_file, declaration_line_distance, declaration),
                     )| {
-                        let same_file_definition_count =
-                            index.read(cx).file_declaration_count(definition);
+                        let same_file_declaration_count =
+                            index.read(cx).file_declaration_count(declaration);
 
                         score_snippet(
                             &identifier,
                             &references,
-                            definition.clone(),
+                            declaration.clone(),
                             is_same_file,
-                            definition_line_distance,
-                            definition_line_distance_rank,
-                            same_file_definition_count,
-                            definition_count,
-                            total_file_count,
+                            declaration_line_distance,
+                            declaration_line_distance_rank,
+                            same_file_declaration_count,
+                            declaration_count,
                             &containing_range_identifier_occurrences,
                             &adjacent_identifier_occurrences,
                             cursor_point,
@@ -172,13 +171,12 @@ fn range_intersection<T: Ord + Clone>(a: &Range<T>, b: &Range<T>) -> Option<Rang
 fn score_snippet(
     identifier: &Identifier,
     references: &[Reference],
-    definition: Declaration,
+    declaration: Declaration,
     is_same_file: bool,
-    definition_line_distance: u32,
-    definition_line_distance_rank: usize,
-    same_file_definition_count: usize,
-    definition_count: usize,
-    definition_file_count: usize,
+    declaration_line_distance: u32,
+    declaration_line_distance_rank: usize,
+    same_file_declaration_count: usize,
+    declaration_count: usize,
     containing_range_identifier_occurrences: &IdentifierOccurrences,
     adjacent_identifier_occurrences: &IdentifierOccurrences,
     cursor: Point,
@@ -201,9 +199,9 @@ fn score_snippet(
         .min()
         .unwrap();
 
-    let item_source_occurrences = IdentifierOccurrences::within_string(&definition.item_text(cx));
+    let item_source_occurrences = IdentifierOccurrences::within_string(&declaration.item_text(cx));
     let item_signature_occurrences =
-        IdentifierOccurrences::within_string(&definition.signature_text(cx));
+        IdentifierOccurrences::within_string(&declaration.signature_text(cx));
     let containing_range_vs_item_jaccard = jaccard_similarity(
         containing_range_identifier_occurrences,
         &item_source_occurrences,
@@ -235,12 +233,11 @@ fn score_snippet(
         is_referenced_nearby,
         is_referenced_in_breadcrumb,
         reference_line_distance,
-        definition_line_distance,
-        definition_line_distance_rank,
+        declaration_line_distance,
+        declaration_line_distance_rank,
         reference_count,
-        same_file_definition_count,
-        definition_count,
-        definition_file_count,
+        same_file_declaration_count,
+        declaration_count,
         containing_range_vs_item_jaccard,
         containing_range_vs_signature_jaccard,
         adjacent_vs_item_jaccard,
@@ -253,7 +250,7 @@ fn score_snippet(
 
     Some(ScoredSnippet {
         identifier: identifier.clone(),
-        declaration: definition,
+        declaration: declaration,
         scores: score_components.score(),
         score_components,
     })
@@ -265,13 +262,11 @@ pub struct ScoreInputs {
     pub is_referenced_nearby: bool,
     pub is_referenced_in_breadcrumb: bool,
     pub reference_count: usize,
-    pub same_file_definition_count: usize,
-    pub definition_count: usize,
-    // todo! do we need this?
-    pub definition_file_count: usize,
+    pub same_file_declaration_count: usize,
+    pub declaration_count: usize,
     pub reference_line_distance: u32,
-    pub definition_line_distance: u32,
-    pub definition_line_distance_rank: usize,
+    pub declaration_line_distance: u32,
+    pub declaration_line_distance_rank: usize,
     pub containing_range_vs_item_jaccard: f32,
     pub containing_range_vs_signature_jaccard: f32,
     pub adjacent_vs_item_jaccard: f32,
@@ -285,18 +280,17 @@ pub struct ScoreInputs {
 #[derive(Clone, Debug, Serialize)]
 pub struct Scores {
     pub signature: f32,
-    pub definition: f32,
+    pub declaration: f32,
 }
 
 impl ScoreInputs {
     fn score(&self) -> Scores {
-        // Score related to how likely this is the correct definition, range 0 to 1
+        // Score related to how likely this is the correct declaration, range 0 to 1
         let accuracy_score = if self.is_same_file {
-            // TODO: use definition_line_distance_rank
-            (0.5 / self.same_file_definition_count as f32)
-                + (0.5 / self.definition_file_count as f32)
+            // TODO: use declaration_line_distance_rank
+            (0.5 / self.same_file_declaration_count as f32)
         } else {
-            1.0 / self.definition_count as f32
+            1.0 / self.declaration_count as f32
         };
 
         // Score related to the distance between the reference and cursor, range 0 to 1
@@ -312,9 +306,9 @@ impl ScoreInputs {
 
         Scores {
             signature: combined_score * self.containing_range_vs_signature_weighted_overlap,
-            // definition score gets boosted both by being multipled by 2 and by there being more
+            // declaration score gets boosted both by being multipled by 2 and by there being more
             // weighted overlap.
-            definition: 2.0 * combined_score * self.containing_range_vs_item_weighted_overlap,
+            declaration: 2.0 * combined_score * self.containing_range_vs_item_weighted_overlap,
         }
     }
 }
