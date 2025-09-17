@@ -5,9 +5,10 @@ use project::buffer_store::{BufferStore, BufferStoreEvent};
 use project::worktree_store::{WorktreeStore, WorktreeStoreEvent};
 use project::{PathChange, Project, ProjectEntryId, ProjectPath};
 use slotmap::SlotMap;
-use std::ops::Range;
+use std::borrow::Cow;
+use std::ops::{Deref, Range};
 use std::sync::Arc;
-use text::Anchor;
+use text::{Anchor, Bias, OffsetRangeExt, ToOffset};
 use util::{ResultExt as _, debug_panic, some_or_debug_panic};
 
 use crate::outline::{Identifier, OutlineDeclaration, declarations_in_buffer};
@@ -34,6 +35,8 @@ use crate::outline::{Identifier, OutlineDeclaration, declarations_in_buffer};
 // * Concurrent slotmap
 //
 // * Use queue for parsing
+
+const ITEM_TEXT_TRUNCATION_LENGTH: usize = 1024;
 
 slotmap::new_key_type! {
     pub struct DeclarationId;
@@ -94,52 +97,90 @@ impl Declaration {
         }
     }
 
-    // todo! pick best return type
-    pub fn item_text(&self, cx: &App) -> Arc<str> {
+    pub fn item_text(&self, cx: &App) -> (Cow<'_, str>, bool) {
         match self {
-            Declaration::File { declaration, .. } => declaration.declaration_text.clone(),
+            Declaration::File { declaration, .. } => (
+                declaration.text.as_ref().into(),
+                declaration.text_is_truncated,
+            ),
             Declaration::Buffer {
                 buffer,
                 declaration,
             } => buffer
                 .read_with(cx, |buffer, _cx| {
-                    buffer
-                        .text_for_range(declaration.item_range.clone())
-                        .collect::<String>()
-                        .into()
+                    let (range, is_truncated) = expand_range_to_line_boundaries_and_truncate(
+                        &declaration.item_range,
+                        ITEM_TEXT_TRUNCATION_LENGTH,
+                        buffer.deref(),
+                    );
+                    (
+                        buffer.text_for_range(range).collect::<Cow<str>>(),
+                        is_truncated,
+                    )
                 })
                 .unwrap_or_default(),
         }
     }
 
-    // todo! pick best return type
-    pub fn signature_text(&self, cx: &App) -> Arc<str> {
+    pub fn signature_text(&self, cx: &App) -> (Cow<'_, str>, bool) {
         match self {
-            Declaration::File { declaration, .. } => declaration.signature_text.clone(),
+            Declaration::File { declaration, .. } => (
+                declaration.text[declaration.signature_range_in_text.clone()].into(),
+                declaration.signature_is_truncated,
+            ),
             Declaration::Buffer {
                 buffer,
                 declaration,
             } => buffer
                 .read_with(cx, |buffer, _cx| {
-                    buffer
-                        .text_for_range(declaration.signature_range.clone())
-                        .collect::<String>()
-                        .into()
+                    let (range, is_truncated) = expand_range_to_line_boundaries_and_truncate(
+                        &declaration.signature_range,
+                        ITEM_TEXT_TRUNCATION_LENGTH,
+                        buffer.deref(),
+                    );
+                    (
+                        buffer.text_for_range(range).collect::<Cow<str>>(),
+                        is_truncated,
+                    )
                 })
                 .unwrap_or_default(),
         }
     }
 }
 
+fn expand_range_to_line_boundaries_and_truncate<T: ToOffset>(
+    range: &Range<T>,
+    limit: usize,
+    buffer: &text::BufferSnapshot,
+) -> (Range<usize>, bool) {
+    let mut point_range = range.to_point(buffer);
+    point_range.start.column = 0;
+    point_range.end.row += 1;
+    point_range.end.column = 0;
+
+    let mut item_range = point_range.to_offset(buffer);
+    let is_truncated = item_range.len() > limit;
+    if is_truncated {
+        item_range.end = item_range.start + limit;
+    }
+    item_range.end = buffer.clip_offset(item_range.end, Bias::Left);
+    (item_range, is_truncated)
+}
+
 #[derive(Debug, Clone)]
 pub struct FileDeclaration {
     pub parent: Option<DeclarationId>,
     pub identifier: Identifier,
-    pub item_range: Range<usize>,
-    pub signature_range: Range<usize>,
-    // todo! should we just store a range with the declaration text?
-    pub signature_text: Arc<str>,
-    pub declaration_text: Arc<str>,
+    /// offset range of the declaration in the file, expanded to line boundaries and truncated
+    pub item_range_in_file: Range<usize>,
+    /// text of `item_range_in_file`
+    pub text: Arc<str>,
+    /// whether `text` was truncated
+    pub text_is_truncated: bool,
+    /// offset range of the signature within `text`
+    pub signature_range_in_text: Range<usize>,
+    /// whether `signature` was truncated
+    pub signature_is_truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -558,19 +599,37 @@ impl FileDeclaration {
         declaration: OutlineDeclaration,
         snapshot: &BufferSnapshot,
     ) -> FileDeclaration {
+        let (item_range_in_file, text_is_truncated) = expand_range_to_line_boundaries_and_truncate(
+            &declaration.item_range,
+            ITEM_TEXT_TRUNCATION_LENGTH,
+            snapshot,
+        );
+
+        // TODO: consider logging if unexpected
+        let signature_start = declaration
+            .signature_range
+            .start
+            .saturating_sub(item_range_in_file.start);
+        let mut signature_end = declaration
+            .signature_range
+            .end
+            .saturating_sub(item_range_in_file.start);
+        let signature_is_truncated = signature_end > item_range_in_file.len();
+        if signature_is_truncated {
+            signature_end = item_range_in_file.len();
+        }
+
         FileDeclaration {
             parent: None,
             identifier: declaration.identifier,
-            signature_text: snapshot
-                .text_for_range(declaration.signature_range.clone())
+            signature_range_in_text: signature_start..signature_end,
+            signature_is_truncated,
+            text: snapshot
+                .text_for_range(item_range_in_file.clone())
                 .collect::<String>()
                 .into(),
-            signature_range: declaration.signature_range,
-            declaration_text: snapshot
-                .text_for_range(declaration.item_range.clone())
-                .collect::<String>()
-                .into(),
-            item_range: declaration.item_range,
+            text_is_truncated,
+            item_range_in_file,
         }
     }
 }
@@ -587,7 +646,6 @@ mod tests {
     use project::{FakeFs, Project, ProjectItem};
     use serde_json::json;
     use settings::SettingsStore;
-    use text::OffsetRangeExt as _;
     use util::path;
 
     use crate::tree_sitter_index::TreeSitterIndex;
@@ -606,11 +664,11 @@ mod tests {
 
             let decl = expect_file_decl("c.rs", &decls[0], &project, cx);
             assert_eq!(decl.identifier, main.clone());
-            assert_eq!(decl.item_range, 32..279);
+            assert_eq!(decl.item_range_in_file, 32..280);
 
             let decl = expect_file_decl("a.rs", &decls[1], &project, cx);
             assert_eq!(decl.identifier, main);
-            assert_eq!(decl.item_range, 0..97);
+            assert_eq!(decl.item_range_in_file, 0..98);
         });
     }
 
