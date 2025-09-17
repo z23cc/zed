@@ -1,20 +1,21 @@
 use itertools::Itertools as _;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use strum::EnumIter;
-use tree_sitter::{QueryCursor, StreamingIterator, Tree};
+use tree_sitter::StreamingIterator;
 
-use crate::{Declaration, outline::Identifier};
+use crate::{
+    Declaration, EditPredictionExcerpt, EditPredictionExcerptText, outline::Identifier,
+    reference::Reference, text_similarity::IdentifierOccurrences,
+};
 
 #[derive(Clone, Debug)]
 pub struct ScoredSnippet {
     #[allow(dead_code)]
     pub identifier: Identifier,
-    pub definition_file: Arc<Path>,
-    pub definition: OutlineItem,
+    pub declaration: Declaration,
     pub score_components: ScoreInputs,
     pub scores: Scores,
 }
@@ -35,51 +36,33 @@ impl ScoredSnippet {
         }
     }
 
-    /// Returns the byte range for the snippet with the specified style. For `Signature` this is the
-    /// signature_range expanded to line boundaries. For `Definition` this is the item_range expanded to
-    /// line boundaries (similar to slice_at_line_boundaries).
-    pub fn line_range(
-        &self,
-        identifier_index: &IdentifierIndex,
-        style: SnippetStyle,
-    ) -> Range<usize> {
-        let source = identifier_index
-            .path_to_source
-            .get(&self.definition_file)
-            .unwrap();
-
-        let base_range = match style {
-            SnippetStyle::Signature => self.definition.signature_range.clone(),
-            SnippetStyle::Definition => self.definition.item_range.clone(),
-        };
-
-        expand_range_to_line_boundaries(source, base_range)
+    pub fn size(&self, style: SnippetStyle) -> usize {
+        todo!()
     }
 
-    pub fn score_density(&self, identifier_index: &IdentifierIndex, style: SnippetStyle) -> f32 {
-        self.score(style) / range_size(self.line_range(identifier_index, style)) as f32
+    pub fn score_density(&self, style: SnippetStyle) -> f32 {
+        self.score(style) / (self.size(style)) as f32
     }
 }
 
 fn scored_snippets(
-    language: &Language,
-    index: &IdentifierIndex,
-    source: &str,
-    reference_file: &Path,
+    excerpt: &EditPredictionExcerpt,
+    excerpt_text: &EditPredictionExcerptText,
     references: Vec<Reference>,
     cursor_offset: usize,
-    excerpt_range: Range<usize>,
 ) -> Vec<ScoredSnippet> {
-    let cursor = point_from_offset(source, cursor_offset);
+    let excerpt_occurrences = IdentifierOccurrences::within_string(&excerpt_text.body);
 
-    let containing_range_identifier_occurrences =
-        IdentifierOccurrences::within_string(&source[excerpt_range.clone()]);
-
+    /* todo!
+    if let Some(cursor_within_excerpt) = cursor_offset.checked_sub(excerpt.range.start) {
+    } else {
+    };
     let start_point = Point::new(cursor.row.saturating_sub(2), 0);
     let end_point = Point::new(cursor.row + 1, 0);
     let adjacent_identifier_occurrences = IdentifierOccurrences::within_string(
         &source[offset_from_point(source, start_point)..offset_from_point(source, end_point)],
     );
+    */
 
     let mut identifier_to_references: HashMap<Identifier, Vec<Reference>> = HashMap::new();
     for reference in references {
@@ -131,8 +114,6 @@ fn scored_snippets(
                                 (definition_line_distance, definition),
                             )| {
                                 score_snippet(
-                                    index,
-                                    source,
                                     &identifier,
                                     &references,
                                     definition_file.clone(),
@@ -158,10 +139,8 @@ fn scored_snippets(
 }
 
 fn score_snippet(
-    index: &IdentifierIndex,
-    reference_source: &str,
     identifier: &Identifier,
-    references: &Vec<Reference>,
+    references: &[Reference],
     definition_file: Arc<Path>,
     definition: OutlineItem,
     is_same_file: bool,
@@ -244,8 +223,8 @@ fn score_snippet(
 
     Some(ScoredSnippet {
         identifier: identifier.clone(),
-        definition_file,
-        definition,
+        declaration_file: definition_file,
+        declaration: definition,
         scores: score_components.score(),
         score_components,
     })
