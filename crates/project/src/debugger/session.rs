@@ -181,6 +181,12 @@ fn client_source(abs_path: &Path) -> dap::Source {
     }
 }
 
+fn client_source2(abs_path: &Path) -> dap::Source {
+    let mut source = client_source(abs_path);
+    source.path = source.path.map(|p| p.replace("\\", "/"));
+    source
+}
+
 impl RunningMode {
     async fn new(
         session_id: SessionId,
@@ -361,7 +367,7 @@ impl RunningMode {
             let error_path = path.clone();
             let send_request = self
                 .request(dap_command::SetBreakpoints {
-                    source: client_source(&path),
+                    source: client_source2(&path),
                     source_modified: Some(false),
                     breakpoints,
                 })

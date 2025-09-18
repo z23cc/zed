@@ -471,7 +471,7 @@ impl StackFrameList {
             s.path
                 .as_deref()
                 .map(|path| Arc::<Path>::from(Path::new(path)))
-                .filter(|path| path.is_absolute())
+            // .filter(|path| path.is_absolute())
         })
     }
 
