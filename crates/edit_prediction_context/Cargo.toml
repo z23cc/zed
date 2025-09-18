@@ -11,10 +11,6 @@ workspace = true
 [lib]
 path = "src/edit_prediction_context.rs"
 
-[[example]]
-name = "zeta_context"
-path = "examples/zeta_context.rs"
-
 [dependencies]
 anyhow.workspace = true
 arrayvec.workspace = true
