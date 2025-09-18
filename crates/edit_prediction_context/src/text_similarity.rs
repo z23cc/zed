@@ -127,6 +127,8 @@ pub fn jaccard_similarity<'a>(
     intersection as f32 / union as f32
 }
 
+// TODO
+#[allow(dead_code)]
 pub fn overlap_coefficient<'a>(
     mut set_a: &'a IdentifierOccurrences,
     mut set_b: &'a IdentifierOccurrences,
@@ -142,6 +144,8 @@ pub fn overlap_coefficient<'a>(
     intersection as f32 / set_a.identifier_to_count.len() as f32
 }
 
+// TODO
+#[allow(dead_code)]
 pub fn weighted_jaccard_similarity<'a>(
     mut set_a: &'a IdentifierOccurrences,
     mut set_b: &'a IdentifierOccurrences,

@@ -17,9 +17,9 @@ use text::{Point, ToOffset as _};
 use crate::declaration_scoring::{ScoredSnippet, scored_snippets};
 
 pub struct EditPredictionContext {
-    excerpt: EditPredictionExcerpt,
-    excerpt_text: EditPredictionExcerptText,
-    snippets: Vec<ScoredSnippet>,
+    pub excerpt: EditPredictionExcerpt,
+    pub excerpt_text: EditPredictionExcerptText,
+    pub snippets: Vec<ScoredSnippet>,
 }
 
 impl EditPredictionContext {

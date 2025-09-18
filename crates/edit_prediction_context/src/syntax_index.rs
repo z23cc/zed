@@ -240,17 +240,22 @@ impl SyntaxIndex {
             let rope = snapshot.text.as_rope().clone();
 
             anyhow::Ok((
-                rope,
                 declarations_in_buffer(&snapshot)
                     .into_iter()
-                    .map(|item| (item.parent_index, BufferDeclaration::from_outline(item)))
+                    .map(|item| {
+                        (
+                            item.parent_index,
+                            BufferDeclaration::from_outline(item, &rope),
+                        )
+                    })
                     .collect::<Vec<_>>(),
+                rope,
             ))
         });
 
         let task = cx.spawn({
             async move |this, cx| {
-                let Ok((rope, declarations)) = parse_task.await else {
+                let Ok((declarations, rope)) = parse_task.await else {
                     return;
                 };
 

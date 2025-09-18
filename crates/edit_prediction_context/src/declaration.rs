@@ -60,17 +60,11 @@ impl Declaration {
             ),
             Declaration::Buffer {
                 rope, declaration, ..
-            } => {
-                let (range, is_truncated) = expand_range_to_line_boundaries_and_truncate(
-                    &declaration.item_range,
-                    ITEM_TEXT_TRUNCATION_LENGTH,
-                    rope,
-                );
-                (
-                    rope.chunks_in_range(range).collect::<Cow<str>>(),
-                    is_truncated,
-                )
-            }
+            } => (
+                rope.chunks_in_range(declaration.item_range.clone())
+                    .collect::<Cow<str>>(),
+                declaration.item_range_is_truncated,
+            ),
         }
     }
 
@@ -82,17 +76,11 @@ impl Declaration {
             ),
             Declaration::Buffer {
                 rope, declaration, ..
-            } => {
-                let (range, is_truncated) = expand_range_to_line_boundaries_and_truncate(
-                    &declaration.signature_range,
-                    ITEM_TEXT_TRUNCATION_LENGTH,
-                    rope,
-                );
-                (
-                    rope.chunks_in_range(range).collect::<Cow<str>>(),
-                    is_truncated,
-                )
-            }
+            } => (
+                rope.chunks_in_range(declaration.signature_range.clone())
+                    .collect::<Cow<str>>(),
+                declaration.signature_range_is_truncated,
+            ),
         }
     }
 }
@@ -175,18 +163,31 @@ pub struct BufferDeclaration {
     pub parent: Option<DeclarationId>,
     pub identifier: Identifier,
     pub item_range: Range<usize>,
+    pub item_range_is_truncated: bool,
     pub signature_range: Range<usize>,
+    pub signature_range_is_truncated: bool,
 }
 
 impl BufferDeclaration {
-    pub fn from_outline(declaration: OutlineDeclaration) -> Self {
-        // use of anchor_before is a guess that the proper behavior is to expand to include
-        // insertions immediately before the declaration, but not for insertions immediately after
+    pub fn from_outline(declaration: OutlineDeclaration, rope: &Rope) -> Self {
+        let (item_range, item_range_is_truncated) = expand_range_to_line_boundaries_and_truncate(
+            &declaration.item_range,
+            ITEM_TEXT_TRUNCATION_LENGTH,
+            rope,
+        );
+        let (signature_range, signature_range_is_truncated) =
+            expand_range_to_line_boundaries_and_truncate(
+                &declaration.signature_range,
+                ITEM_TEXT_TRUNCATION_LENGTH,
+                rope,
+            );
         Self {
             parent: None,
             identifier: declaration.identifier,
-            item_range: declaration.item_range,
-            signature_range: declaration.signature_range,
+            item_range,
+            item_range_is_truncated,
+            signature_range,
+            signature_range_is_truncated,
         }
     }
 }

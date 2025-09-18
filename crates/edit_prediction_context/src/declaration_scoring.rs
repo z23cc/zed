@@ -1,5 +1,6 @@
 use itertools::Itertools as _;
 use language::BufferSnapshot;
+use ordered_float::OrderedFloat;
 use serde::Serialize;
 use std::{collections::HashMap, ops::Range};
 use strum::EnumIter;
@@ -12,13 +13,14 @@ use crate::{
     text_similarity::{IdentifierOccurrences, jaccard_similarity, weighted_overlap_coefficient},
 };
 
+const MAX_IDENTIFIER_DECLARATION_COUNT: usize = 16;
+
 // TODO:
 //
-// * Consider adding declaration_file_count (n)
+// * Consider adding declaration_file_count
 
 #[derive(Clone, Debug)]
 pub struct ScoredSnippet {
-    #[allow(dead_code)]
     pub identifier: Identifier,
     pub declaration: Declaration,
     pub score_components: ScoreInputs,
@@ -42,7 +44,17 @@ impl ScoredSnippet {
     }
 
     pub fn size(&self, style: SnippetStyle) -> usize {
-        todo!()
+        // TODO: how to handle truncation?
+        match &self.declaration {
+            Declaration::File { declaration, .. } => match style {
+                SnippetStyle::Signature => declaration.signature_range_in_text.len(),
+                SnippetStyle::Declaration => declaration.text.len(),
+            },
+            Declaration::Buffer { declaration, .. } => match style {
+                SnippetStyle::Signature => declaration.signature_range.len(),
+                SnippetStyle::Declaration => declaration.item_range.len(),
+            },
+        }
     }
 
     pub fn score_density(&self, style: SnippetStyle) -> f32 {
@@ -70,11 +82,11 @@ pub fn scored_snippets(
             .collect::<String>(),
     );
 
-    identifier_to_references
+    let mut snippets = identifier_to_references
         .into_iter()
         .flat_map(|(identifier, references)| {
-            // todo! pick a limit
-            let declarations = index.declarations_for_identifier::<16>(&identifier);
+            let declarations =
+                index.declarations_for_identifier::<MAX_IDENTIFIER_DECLARATION_COUNT>(&identifier);
             let declaration_count = declarations.len();
 
             declarations
@@ -144,10 +156,19 @@ pub fn scored_snippets(
                 .collect::<Vec<_>>()
         })
         .flatten()
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>();
+
+    snippets.sort_unstable_by_key(|snippet| {
+        OrderedFloat(
+            snippet
+                .score_density(SnippetStyle::Declaration)
+                .max(snippet.score_density(SnippetStyle::Signature)),
+        )
+    });
+
+    snippets
 }
 
-// todo! replace with existing util?
 fn range_intersection<T: Ord + Clone>(a: &Range<T>, b: &Range<T>) -> Option<Range<T>> {
     let start = a.start.clone().max(b.start.clone());
     let end = a.end.clone().min(b.end.clone());
