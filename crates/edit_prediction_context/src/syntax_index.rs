@@ -426,6 +426,9 @@ impl SyntaxIndexState {
         self.declarations.get(id)
     }
 
+    /// Returns declarations for the identifier. If the limit is exceeded, returns an empty vector.
+    ///
+    /// TODO: Consider doing some pre-ranking and instead truncating when N is exceeded.
     pub fn declarations_for_identifier<const N: usize>(
         &self,
         identifier: &Identifier,
@@ -453,7 +456,7 @@ impl SyntaxIndexState {
                     included_buffer_entry_ids.push(*project_entry_id);
                     result.push(declaration.clone());
                     if result.len() == N {
-                        return result;
+                        return Vec::new();
                     }
                 }
                 Declaration::File {
@@ -475,7 +478,7 @@ impl SyntaxIndexState {
                         result.push(declaration);
 
                         if result.len() == N {
-                            return result;
+                            return Vec::new();
                         }
                     }
                 }
@@ -644,7 +647,7 @@ mod tests {
             name: "main".into(),
             language_id: rust_lang_id,
         });
-        assert_eq!(decls.len(), 1);
+        assert_eq!(decls.len(), 0);
     }
 
     #[gpui::test]
