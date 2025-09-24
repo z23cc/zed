@@ -152,7 +152,7 @@ pub enum MaybeNavigationTarget {
     PathLike(PathLikeTarget),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum InternalEvent {
     Resize(TerminalBounds),
     Clear,
@@ -780,6 +780,7 @@ impl TaskStatus {
 
 impl Terminal {
     fn process_event(&mut self, event: AlacTermEvent, cx: &mut Context<Self>) {
+        println!("Processing alacritty event: {event:?}");
         match event {
             AlacTermEvent::Title(title) => {
                 // ignore default shell program title change as windows always sends those events
@@ -882,13 +883,7 @@ impl Terminal {
                 term.resize(new_bounds);
             }
             InternalEvent::Clear => {
-                // Clear back buffer
-                term.clear_screen(ClearMode::Saved);
-
                 let cursor = term.grid().cursor.point;
-
-                // Clear the lines above
-                term.grid_mut().reset_region(..cursor.line);
 
                 // Copy the current line up
                 let line = term.grid()[cursor.line][..Column(term.grid().columns())]
@@ -897,19 +892,39 @@ impl Terminal {
                     .enumerate()
                     .collect::<Vec<(usize, Cell)>>();
 
+                // Clear back buffer
+                // term.clear_screen(ClearMode::Saved);
+                term.grid_mut().clear_history();
+                term.grid_mut().clear_viewport();
+
+                // Clear the lines above
+                // term.grid_mut().reset_region(..cursor.line);
+
+                let mut contents = String::new();
                 for (i, cell) in line {
-                    term.grid_mut()[Line(0)][Column(i)] = cell;
+                    contents.push(cell.c);
+                    term.grid_mut()[Line(5)][Column(i)] = cell;
                 }
 
                 // Reset the cursor
-                term.grid_mut().cursor.point =
-                    AlacPoint::new(Line(0), term.grid_mut().cursor.point.column);
-                let new_cursor = term.grid().cursor.point;
+                let new_point = AlacPoint::new(Line(5), term.grid_mut().cursor.point.column);
+                term.grid_mut().cursor.point = new_point;
+
+                println!("  >>> Updating cursor at {new_point:?}: {contents}");
+                println!(
+                    "  >>> Renderable content: cursor={:?}, display_offset={:?}, mode={:?}",
+                    term.renderable_content().cursor.point,
+                    term.renderable_content().display_offset,
+                    term.renderable_content().mode
+                );
+                //     AlacPoint::new(Line(0), term.grid_mut().cursor.point.column);
+                // let new_cursor = term.grid().cursor.point;
+                // dbg!(&new_cursor);
 
                 // Clear the lines below the new cursor
-                if (new_cursor.line.0 as usize) < term.screen_lines() - 1 {
-                    term.grid_mut().reset_region((new_cursor.line + 1)..);
-                }
+                // if (new_cursor.line.0 as usize) < term.screen_lines() - 1 {
+                //     term.grid_mut().reset_region((new_cursor.line + 1)..);
+                // }
 
                 cx.emit(Event::Wakeup);
             }
@@ -1015,6 +1030,9 @@ impl Terminal {
                 term.vi_motion(*motion);
             }
             InternalEvent::FindHyperlink(position, open) => {
+                if true {
+                    return;
+                }
                 let prev_hovered_word = self.last_content.last_hovered_word.take();
 
                 let point = grid_point(
@@ -1395,6 +1413,8 @@ impl Terminal {
         let mut terminal = term.lock_unfair();
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
+            println!("Processing terminal event: {e:?}");
+            println!("  Current cursor: {:?}", terminal.grid().cursor.point);
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
 
@@ -1403,6 +1423,9 @@ impl Terminal {
 
     fn make_content(term: &Term<ZedListener>, last_content: &TerminalContent) -> TerminalContent {
         let content = term.renderable_content();
+        println!("  Cursor from content: {:?}", content.cursor.point);
+        println!("  Cursor from grid: {:?}", term.grid().cursor.point);
+        println!("  Display offset: {:?}", content.display_offset);
 
         // Pre-allocate with estimated size to reduce reallocations
         let estimated_size = content.display_iter.size_hint().0;

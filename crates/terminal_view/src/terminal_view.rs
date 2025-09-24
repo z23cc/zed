@@ -1045,6 +1045,7 @@ impl Render for TerminalView {
         if let Some(new_display_offset) = self.scroll_handle.future_display_offset.take() {
             self.terminal.update(cx, |term, _| {
                 let delta = new_display_offset as i32 - term.last_content.display_offset as i32;
+                dbg!(delta);
                 match delta.cmp(&0) {
                     std::cmp::Ordering::Greater => term.scroll_up_by(delta as usize),
                     std::cmp::Ordering::Less => term.scroll_down_by(-delta as usize),
