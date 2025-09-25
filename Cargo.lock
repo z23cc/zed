@@ -6434,6 +6434,7 @@ dependencies = [
  "log",
  "nucleo",
  "util",
+ "util_macros",
  "workspace-hack",
  "zed-util",
 ]
