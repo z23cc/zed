@@ -32,20 +32,7 @@ const CRASH_HANDLER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 static PANIC_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
-pub async fn init(crash_init: InitCrashHandler) {
-    if *RELEASE_CHANNEL == ReleaseChannel::Dev && env::var("ZED_GENERATE_MINIDUMPS").is_err() {
-        let old_hook = panic::take_hook();
-        panic::set_hook(Box::new(move |info| {
-            unsafe { env::set_var("RUST_BACKTRACE", "1") };
-            old_hook(info);
-            // prevent the macOS crash dialog from popping up
-            std::process::exit(1);
-        }));
-        return;
-    } else {
-        panic::set_hook(Box::new(panic_hook));
-    }
-
+pub async fn spawn_sidecar(crash_init: InitCrashHandler) -> Client {
     let exe = env::current_exe().expect("unable to find ourselves");
     let zed_pid = process::id();
     // TODO: we should be able to get away with using 1 crash-handler process per machine,
@@ -54,14 +41,14 @@ pub async fn init(crash_init: InitCrashHandler) {
     // used by the crash handler isn't destroyed correctly which causes it to stay on the file
     // system and block further attempts to initialize crash handlers with that socket path.
     let socket_name = paths::temp_dir().join(format!("zed-crash-handler-{zed_pid}"));
-    let _crash_handler = Command::new(exe)
+    let crash_handler = Command::new(exe)
         .arg("--crash-handler")
         .arg(&socket_name)
         .spawn()
         .expect("unable to spawn server process");
     #[cfg(target_os = "linux")]
-    let server_pid = _crash_handler.id();
-    info!("spawning crash handler process");
+    let server_pid = crash_handler.id();
+    info!("spawned crash handler process with pid: {server_pid}");
 
     let mut elapsed = Duration::ZERO;
     let retry_frequency = Duration::from_millis(100);
@@ -79,8 +66,24 @@ pub async fn init(crash_init: InitCrashHandler) {
     client
         .send_message(1, serde_json::to_vec(&crash_init).unwrap())
         .unwrap();
+    client
+}
 
-    let client = Arc::new(client);
+pub async fn init(crash_init: InitCrashHandler) {
+    if *RELEASE_CHANNEL == ReleaseChannel::Dev && env::var("ZED_GENERATE_MINIDUMPS").is_err() {
+        let old_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            unsafe { env::set_var("RUST_BACKTRACE", "1") };
+            old_hook(info);
+            // prevent the macOS crash dialog from popping up
+            std::process::exit(1);
+        }));
+        return;
+    } else {
+        panic::set_hook(Box::new(panic_hook));
+    }
+
+    let client = Arc::new(spawn_sidecar(crash_init.clone()));
     let handler = CrashHandler::attach(unsafe {
         let client = client.clone();
         crash_handler::make_crash_event(move |crash_context: &crash_handler::CrashContext| {
