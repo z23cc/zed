@@ -1771,13 +1771,7 @@ impl Image {
             ImageFormat::Bmp => frames_for_image(&self.bytes, image::ImageFormat::Bmp)?,
             ImageFormat::Tiff => frames_for_image(&self.bytes, image::ImageFormat::Tiff)?,
             ImageFormat::Svg => {
-                let pixmap = svg_renderer.render_pixmap(&self.bytes, SvgSize::ScaleFactor(1.0))?;
-
-                let buffer =
-                    image::ImageBuffer::from_raw(pixmap.width(), pixmap.height(), pixmap.take())
-                        .unwrap();
-
-                SmallVec::from_elem(Frame::new(buffer), 1)
+                svg_renderer.render_single_frame(&self.bytes, SvgSize::ScaleFactor(1.0), false)?
             }
         };
 

@@ -3,13 +3,13 @@ use crate::{
     Element, ElementId, Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId,
     InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
     RenderImage, Resource, SMOOTH_SVG_SCALE_FACTOR, SharedString, SharedUri, StyleRefinement,
-    Styled, SvgSize, Task, Window, px, swap_rgba_pa_to_bgra,
+    Styled, SvgSize, Task, Window, px,
 };
 use anyhow::{Context as _, Result};
 
 use futures::{AsyncReadExt, Future};
 use image::{
-    AnimationDecoder, DynamicImage, Frame, ImageBuffer, ImageError, ImageFormat, Rgba,
+    AnimationDecoder, DynamicImage, Frame, ImageError, ImageFormat, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
 };
 use smallvec::SmallVec;
@@ -687,18 +687,11 @@ impl Asset for ImageAssetLoader {
 
                 RenderImage::new(data)
             } else {
-                let pixmap =
+                let frame =
                     // TODO: Can we make svgs always rescale?
-                    svg_renderer.render_pixmap(&bytes, SvgSize::ScaleFactor(SMOOTH_SVG_SCALE_FACTOR))?;
+                    svg_renderer.render_single_frame(&bytes, SvgSize::ScaleFactor(SMOOTH_SVG_SCALE_FACTOR), true)?;
 
-                let mut buffer =
-                    ImageBuffer::from_raw(pixmap.width(), pixmap.height(), pixmap.take()).unwrap();
-
-                for pixel in buffer.chunks_exact_mut(4) {
-                    swap_rgba_pa_to_bgra(pixel);
-                }
-
-                let mut image = RenderImage::new(SmallVec::from_elem(Frame::new(buffer), 1));
+                let mut image = RenderImage::new(frame);
                 image.scale_factor = SMOOTH_SVG_SCALE_FACTOR;
                 image
             };
