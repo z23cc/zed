@@ -81,7 +81,7 @@ use std::{
     time::{Duration, Instant},
 };
 use sum_tree::Bias;
-use text::{BufferId, SelectionGoal};
+use text::{BufferId, SelectionGoal, ToPoint as _};
 use theme::{ActiveTheme, Appearance, BufferLineHeight, PlayerColor};
 use ui::utils::ensure_minimum_contrast;
 use ui::{
@@ -6196,6 +6196,7 @@ impl EditorElement {
             let row = DisplayRow(layout.visible_display_row_range.start.0 + ix as u32);
             line_with_invisibles.draw(
                 layout,
+                layout.position_map.scroll_pixel_position,
                 row,
                 layout.content_origin,
                 whitespace_setting,
@@ -6210,6 +6211,43 @@ impl EditorElement {
         }
     }
 
+    fn paint_sticky_lines(&mut self, layout: &mut EditorLayout, window: &mut Window, cx: &mut App) {
+        window.paint_layer(layout.hitbox.bounds, |window| {
+            let gutter_bg = cx.theme().colors().editor_gutter_background;
+            let mut background_bounds = layout.position_map.text_hitbox.bounds;
+            background_bounds.size.height =
+                layout.position_map.sticky_line_layouts.len() * layout.position_map.line_height;
+            let mut gutter_bounds = layout.gutter_hitbox.bounds;
+            gutter_bounds.size.height = background_bounds.size.height;
+
+            window.paint_quad(fill(gutter_bounds, gutter_bg));
+            window.paint_quad(fill(background_bounds, self.style.background));
+        });
+
+        for (row, line) in layout.position_map.sticky_line_layouts.iter().enumerate() {
+            line.draw_background(
+                layout,
+                gpui::Point::default(),
+                DisplayRow(row as u32),
+                layout.content_origin,
+                window,
+                cx,
+            );
+
+            line.draw(
+                layout,
+                gpui::Point::default(),
+                DisplayRow(row as u32),
+                layout.content_origin,
+                // todo!
+                ShowWhitespaceSetting::All,
+                &[],
+                window,
+                cx,
+            )
+        }
+    }
+
     fn paint_lines_background(
         &mut self,
         layout: &mut EditorLayout,
@@ -6218,7 +6256,14 @@ impl EditorElement {
     ) {
         for (ix, line_with_invisibles) in layout.position_map.line_layouts.iter().enumerate() {
             let row = DisplayRow(layout.visible_display_row_range.start.0 + ix as u32);
-            line_with_invisibles.draw_background(layout, row, layout.content_origin, window, cx);
+            line_with_invisibles.draw_background(
+                layout,
+                layout.position_map.scroll_pixel_position,
+                row,
+                layout.content_origin,
+                window,
+                cx,
+            );
         }
     }
 
@@ -7919,6 +7964,7 @@ impl LineWithInvisibles {
     fn draw(
         &self,
         layout: &EditorLayout,
+        scroll_pixel_position: gpui::Point<Pixels>,
         row: DisplayRow,
         content_origin: gpui::Point<Pixels>,
         whitespace_setting: ShowWhitespaceSetting,
@@ -7927,11 +7973,9 @@ impl LineWithInvisibles {
         cx: &mut App,
     ) {
         let line_height = layout.position_map.line_height;
-        let line_y = line_height
-            * (row.as_f32() - layout.position_map.scroll_pixel_position.y / line_height);
+        let line_y = line_height * (row.as_f32() - scroll_pixel_position.y / line_height);
 
-        let mut fragment_origin =
-            content_origin + gpui::point(-layout.position_map.scroll_pixel_position.x, line_y);
+        let mut fragment_origin = content_origin + gpui::point(-scroll_pixel_position.x, line_y);
 
         for fragment in &self.fragments {
             match fragment {
@@ -7949,6 +7993,7 @@ impl LineWithInvisibles {
         self.draw_invisibles(
             selection_ranges,
             layout,
+            scroll_pixel_position,
             content_origin,
             line_y,
             row,
@@ -7962,17 +8007,16 @@ impl LineWithInvisibles {
     fn draw_background(
         &self,
         layout: &EditorLayout,
+        scroll_pixel_position: gpui::Point<Pixels>,
         row: DisplayRow,
         content_origin: gpui::Point<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) {
         let line_height = layout.position_map.line_height;
-        let line_y = line_height
-            * (row.as_f32() - layout.position_map.scroll_pixel_position.y / line_height);
+        let line_y = line_height * (row.as_f32() - scroll_pixel_position.y / line_height);
 
-        let mut fragment_origin =
-            content_origin + gpui::point(-layout.position_map.scroll_pixel_position.x, line_y);
+        let mut fragment_origin = content_origin + gpui::point(-scroll_pixel_position.x, line_y);
 
         for fragment in &self.fragments {
             match fragment {
@@ -7992,6 +8036,7 @@ impl LineWithInvisibles {
         &self,
         selection_ranges: &[Range<DisplayPoint>],
         layout: &EditorLayout,
+        scroll_pixel_position: gpui::Point<Pixels>,
         content_origin: gpui::Point<Pixels>,
         line_y: Pixels,
         row: DisplayRow,
@@ -8016,7 +8061,7 @@ impl LineWithInvisibles {
                 (layout.position_map.em_width - invisible_symbol.width).max(Pixels::ZERO) / 2.0;
             let origin = content_origin
                 + gpui::point(
-                    x_offset + invisible_offset - layout.position_map.scroll_pixel_position.x,
+                    x_offset + invisible_offset - scroll_pixel_position.x,
                     line_y,
                 );
 
@@ -8726,6 +8771,56 @@ impl Element for EditorElement {
                         cx,
                     );
 
+                    let start_buffer_row =
+                        MultiBufferRow(start_anchor.to_point(&snapshot.buffer_snapshot).row);
+                    let end_buffer_row =
+                        MultiBufferRow(end_anchor.to_point(&snapshot.buffer_snapshot).row);
+
+                    let sticky_line_layouts = snapshot
+                        .buffer_snapshot
+                        .as_singleton()
+                        .map(|(_, _, singleton_snapshot)| {
+                            let outline_items = singleton_snapshot.outline_items_containing(
+                                language::Point::new(start_buffer_row.0, 0)
+                                    ..language::Point::new(start_buffer_row.0 + 1, 0),
+                                false,
+                                None,
+                            );
+
+                            let mut sticky_line_layouts = Vec::with_capacity(outline_items.len());
+
+                            for item in outline_items {
+                                let point = item.range.start.to_point(&singleton_snapshot);
+                                let display_row = snapshot
+                                    .display_snapshot
+                                    .point_to_display_point(
+                                        MultiBufferPoint::new(point.row, point.column),
+                                        Bias::Right,
+                                    )
+                                    .row();
+                                // todo! do we need to check if valid?
+                                let rows = display_row..DisplayRow(display_row.0 + 1);
+
+                                let chunks =
+                                    snapshot.highlighted_chunks(rows.clone(), true, &self.style);
+                                sticky_line_layouts.extend(LineWithInvisibles::from_chunks(
+                                    chunks,
+                                    style,
+                                    MAX_LINE_LEN,
+                                    1,
+                                    &snapshot.mode,
+                                    editor_width,
+                                    is_row_soft_wrapped,
+                                    Default::default(),
+                                    window,
+                                    cx,
+                                ))
+                            }
+
+                            sticky_line_layouts
+                        })
+                        .unwrap_or_default();
+
                     // We add the gutter breakpoint indicator to breakpoint_rows after painting
                     // line numbers so we don't paint a line number debug accent color if a user
                     // has their mouse over that line when a breakpoint isn't there
@@ -8946,11 +9041,6 @@ impl Element for EditorElement {
                             )
                         })
                     });
-
-                    let start_buffer_row =
-                        MultiBufferRow(start_anchor.to_point(&snapshot.buffer_snapshot).row);
-                    let end_buffer_row =
-                        MultiBufferRow(end_anchor.to_point(&snapshot.buffer_snapshot).row);
 
                     let scroll_max = point(
                         ((scroll_width - editor_width) / em_advance).max(0.0),
@@ -9392,6 +9482,7 @@ impl Element for EditorElement {
                         visible_row_range,
                         scroll_pixel_position,
                         scroll_max,
+                        sticky_line_layouts,
                         line_layouts,
                         line_height,
                         em_width,
@@ -9518,6 +9609,7 @@ impl Element for EditorElement {
                         }
                     });
 
+                    self.paint_sticky_lines(layout, window, cx);
                     self.paint_minimap(layout, window, cx);
                     self.paint_scrollbars(layout, window, cx);
                     self.paint_edit_prediction_popover(layout, window, cx);
@@ -10057,6 +10149,7 @@ pub(crate) struct PositionMap {
     pub em_width: Pixels,
     pub em_advance: Pixels,
     pub visible_row_range: Range<DisplayRow>,
+    pub sticky_line_layouts: Vec<LineWithInvisibles>,
     pub line_layouts: Vec<LineWithInvisibles>,
     pub snapshot: EditorSnapshot,
     pub text_hitbox: Hitbox,
