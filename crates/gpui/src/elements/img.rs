@@ -2,8 +2,7 @@ use crate::{
     AbsoluteLength, AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength,
     Element, ElementId, Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId,
     InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
-    RenderImage, Resource, SMOOTH_SVG_SCALE_FACTOR, SharedString, SharedUri, StyleRefinement,
-    Styled, SvgSize, Task, Window, px,
+    RenderImage, Resource, SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
 };
 use anyhow::{Context as _, Result};
 
@@ -687,13 +686,7 @@ impl Asset for ImageAssetLoader {
 
                 RenderImage::new(data)
             } else {
-                let frame =
-                    // TODO: Can we make svgs always rescale?
-                    svg_renderer.render_single_frame(&bytes, SvgSize::ScaleFactor(SMOOTH_SVG_SCALE_FACTOR), true)?;
-
-                let mut image = RenderImage::new(frame);
-                image.scale_factor = SMOOTH_SVG_SCALE_FACTOR;
-                image
+                return Ok(svg_renderer.render_single_frame(&bytes, 1.0, true)?);
             };
 
             Ok(Arc::new(data))

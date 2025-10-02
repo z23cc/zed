@@ -1,4 +1,7 @@
-use crate::{AssetSource, DevicePixels, IsZero, Result, SharedString, Size, swap_rgba_pa_to_bgra};
+use crate::{
+    AssetSource, DevicePixels, IsZero, RenderImage, Result, SharedString, Size,
+    swap_rgba_pa_to_bgra,
+};
 use image::Frame;
 use resvg::tiny_skia::Pixmap;
 use smallvec::SmallVec;
@@ -65,10 +68,15 @@ impl SvgRenderer {
     pub fn render_single_frame(
         &self,
         bytes: &[u8],
-        size: SvgSize,
+        scale_factor: f32,
         to_brga: bool,
-    ) -> Result<SmallVec<[Frame; 1]>, usvg::Error> {
-        self.render_pixmap(bytes, size).map(|pixmap| {
+    ) -> Result<Arc<RenderImage>, usvg::Error> {
+        dbg!(&scale_factor, SMOOTH_SVG_SCALE_FACTOR);
+        self.render_pixmap(
+            bytes,
+            SvgSize::ScaleFactor(scale_factor * SMOOTH_SVG_SCALE_FACTOR),
+        )
+        .map(|pixmap| {
             let mut buffer =
                 image::ImageBuffer::from_raw(pixmap.width(), pixmap.height(), pixmap.take())
                     .unwrap();
@@ -79,11 +87,13 @@ impl SvgRenderer {
                 }
             }
 
-            SmallVec::from_const([Frame::new(buffer)])
+            let mut image = RenderImage::new(SmallVec::from_const([Frame::new(buffer)]));
+            image.scale_factor = SMOOTH_SVG_SCALE_FACTOR;
+            Arc::new(image)
         })
     }
 
-    pub(crate) fn render(&self, params: &RenderSvgParams) -> Result<Option<Vec<u8>>> {
+    pub(crate) fn render_alpha_mask(&self, params: &RenderSvgParams) -> Result<Option<Vec<u8>>> {
         anyhow::ensure!(!params.size.is_zero(), "can't render at a zero size");
 
         // Load the tree.

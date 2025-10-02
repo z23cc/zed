@@ -2,14 +2,12 @@ use std::sync::Arc;
 
 use editor::Editor;
 use file_icons::FileIcons;
-use futures::channel::oneshot;
 use gpui::{
     App, Context, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     ParentElement, Point, Render, RenderImage, ScrollWheelEvent, Styled, Subscription, SvgSize,
     Task, WeakEntity, Window, div, img,
 };
 use language::{Buffer, BufferEvent};
-use smol::channel::Sender;
 use ui::prelude::*;
 use workspace::item::Item;
 use workspace::{Pane, Workspace};
@@ -20,19 +18,13 @@ pub struct SvgPreviewView {
     focus_handle: FocusHandle,
     buffer: Option<Entity<Buffer>>,
     current_svg: Option<Arc<RenderImage>>,
+    error: Option<SharedString>,
     scale_factor: f32,
-    channel: Sender<(Reason, oneshot::Sender<Arc<RenderImage>>)>,
     drag_start: Point<Pixels>,
     image_offset: Point<Pixels>,
-    _background_task: Task<()>,
+    _refresh: Task<()>,
     _buffer_subscription: Option<Subscription>,
     _workspace_subscription: Option<Subscription>,
-}
-
-enum Reason {
-    ContentChanged(String),
-    ScaleChanged(f32),
-    RefreshRequested,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,8 +35,6 @@ pub enum SvgPreviewMode {
     Follow,
 }
 
-const DEFAULT_SCALE_FACTOR: f32 = 2.0;
-
 impl SvgPreviewView {
     pub fn new(
         mode: SvgPreviewMode,
@@ -54,47 +44,13 @@ impl SvgPreviewView {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         cx.new(|cx| {
-            let (channel, rx) =
-                smol::channel::unbounded::<(Reason, oneshot::Sender<Arc<RenderImage>>)>();
-
-            let workspace_subscription = (mode == SvgPreviewMode::Follow)
-                .then(|| {
-                    workspace_handle.upgrade().map(|workspace_handle| {
-                        cx.subscribe_in(
-                            &workspace_handle,
-                            window,
-                            move |this: &mut SvgPreviewView,
-                                  workspace,
-                                  event: &workspace::Event,
-                                  window,
-                                  cx| {
-                                if let workspace::Event::ActiveItemChanged = event {
-                                    let workspace_read = workspace.read(cx);
-                                    if let Some(active_item) = workspace_read.active_item(cx)
-                                        && let Some(editor) = active_item.downcast::<Editor>()
-                                        && Self::is_svg_file(&editor, cx)
-                                    {
-                                        let buffer =
-                                            editor.read(cx).buffer().read(cx).as_singleton();
-                                        if this.buffer != buffer {
-                                            this._buffer_subscription =
-                                                Self::create_buffer_subscription(
-                                                    buffer.as_ref(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            this.current_svg =
-                                                Self::render_svg_for_buffer(buffer.as_ref(), cx);
-                                            this.buffer = buffer;
-                                            cx.notify();
-                                        }
-                                    }
-                                }
-                            },
-                        )
-                    })
-                })
-                .flatten();
+            let workspace_subscription = if mode == SvgPreviewMode::Follow
+                && let Some(workspace) = workspace_handle.upgrade()
+            {
+                Some(Self::subscribe_to_workspace(workspace, window, cx))
+            } else {
+                None
+            };
 
             let buffer = active_editor
                 .read(cx)
@@ -102,78 +58,86 @@ impl SvgPreviewView {
                 .clone()
                 .read_with(cx, |buffer, _cx| buffer.as_singleton());
 
-            let subscription = Self::create_buffer_subscription(buffer.as_ref(), window, cx);
-
-            let image = Self::render_svg_for_buffer(buffer.as_ref(), cx);
-
-            let content = buffer
+            let subscription = buffer
                 .as_ref()
-                .map(|buffer| buffer.read(cx).text())
-                .unwrap_or_default();
-            let renderer = cx.svg_renderer();
+                .map(|buffer| Self::create_buffer_subscription(buffer, window, cx));
 
-            let background_task = cx.background_spawn(async move {
-                let mut content = content;
-                let mut scale_factor = DEFAULT_SCALE_FACTOR;
-                while let Ok((task, tx)) = rx.recv().await {
-                    match task {
-                        Reason::ContentChanged(new_content) => content = new_content,
-                        Reason::ScaleChanged(new_scale) => scale_factor = new_scale,
-                        Reason::RefreshRequested => {}
-                    };
-
-                    let image = renderer
-                        .render_single_frame(
-                            content.as_bytes(),
-                            SvgSize::ScaleFactor(scale_factor),
-                            true,
-                        )
-                        .map(|frame| Arc::new(RenderImage::new(frame)));
-
-                    if let Ok(image) = image {
-                        tx.send(image).ok();
-                    }
-                }
-            });
-
-            let this = Self {
+            let mut this = Self {
                 focus_handle: cx.focus_handle(),
                 buffer,
-                current_svg: image,
-                channel,
-                scale_factor: DEFAULT_SCALE_FACTOR,
+                error: None,
+                current_svg: None,
+                scale_factor: 1.0,
                 drag_start: Default::default(),
                 image_offset: Default::default(),
                 _buffer_subscription: subscription,
                 _workspace_subscription: workspace_subscription,
-                _background_task: background_task,
+                _refresh: Task::ready(()),
             };
-            this.render_image(Reason::RefreshRequested, window, cx);
+            this.render_image(window, cx);
 
             this
         })
     }
 
-    fn render_image(&self, reason: Reason, window: &Window, cx: &mut Context<Self>) {
-        let (tx, rx) = oneshot::channel();
+    fn subscribe_to_workspace(
+        workspace: Entity<Workspace>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            &workspace,
+            window,
+            move |this: &mut SvgPreviewView, workspace, event: &workspace::Event, window, cx| {
+                if let workspace::Event::ActiveItemChanged = event {
+                    let workspace = workspace.read(cx);
+                    if let Some(active_item) = workspace.active_item(cx)
+                        && let Some(editor) = active_item.downcast::<Editor>()
+                        && Self::is_svg_file(&editor, cx)
+                    {
+                        let Some(buffer) = editor.read(cx).buffer().read(cx).as_singleton() else {
+                            return;
+                        };
+                        if this.buffer.as_ref() != Some(&buffer) {
+                            this._buffer_subscription =
+                                Some(Self::create_buffer_subscription(&buffer, window, cx));
+                            this.buffer = Some(buffer);
+                            this.render_image(window, cx);
+                            cx.notify();
+                        }
+                    }
+                }
+            },
+        )
+    }
 
-        let channel = self.channel.clone();
+    fn render_image(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(buffer) = self.buffer.as_ref() else {
+            return;
+        };
 
-        cx.spawn_in(window, async move |this, cx| {
-            channel.send((reason, tx)).await.ok();
+        let renderer = cx.svg_renderer();
+        let content = buffer.read(cx).snapshot();
+        let scale_factor = self.scale_factor;
+        let background_task = cx.background_spawn(async move {
+            renderer.render_single_frame(content.text().as_bytes(), scale_factor, true)
+        });
+        self._refresh = cx.spawn_in(window, async move |this, cx| {
+            let result = background_task.await;
 
-            if let Ok(image) = rx.await {
-                this.update_in(cx, |view, window, cx| {
+            this.update_in(cx, |view, window, cx| match result {
+                Ok(image) => {
                     if let Some(image) = view.current_svg.take() {
                         window.drop_image(image).ok();
                     }
                     view.current_svg = Some(image);
+                    view.error = None;
                     cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
+                }
+                Err(e) => view.error = Some(format!("{}", e).into()),
+            })
+            .ok();
+        });
     }
 
     fn find_existing_preview_item_idx(
@@ -214,39 +178,20 @@ impl SvgPreviewView {
     }
 
     fn create_buffer_subscription(
-        buffer: Option<&Entity<Buffer>>,
+        buffer: &Entity<Buffer>,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Option<Subscription> {
-        buffer.map(|buffer| {
-            cx.subscribe_in(
-                buffer,
-                window,
-                move |this, buffer, event: &BufferEvent, window, cx| match event {
-                    BufferEvent::Edited | BufferEvent::Saved => {
-                        let content = buffer.read(cx).text();
-                        this.render_image(Reason::ContentChanged(content), window, cx);
-                    }
-                    _ => {}
-                },
-            )
-        })
-    }
-
-    fn render_svg_for_buffer(
-        buffer: Option<&Entity<Buffer>>,
-        cx: &App,
-    ) -> Option<Arc<RenderImage>> {
-        buffer.and_then(|buffer| {
-            cx.svg_renderer()
-                .render_single_frame(
-                    buffer.read(cx).text().as_bytes(),
-                    SvgSize::ScaleFactor(2.),
-                    true,
-                )
-                .map(|frame| Arc::new(RenderImage::new(frame)))
-                .ok()
-        })
+    ) -> Subscription {
+        cx.subscribe_in(
+            buffer,
+            window,
+            move |this, _buffer, event: &BufferEvent, window, cx| match event {
+                BufferEvent::Edited | BufferEvent::Saved => {
+                    this.render_image(window, cx);
+                }
+                _ => {}
+            },
+        )
     }
 
     pub fn is_svg_file(editor: &Entity<Editor>, cx: &App) -> bool {
@@ -387,7 +332,7 @@ impl Render for SvgPreviewView {
                         if delta.abs() != 0. {
                             this.scale_factor = (this.scale_factor + delta).clamp(0.25, 20.);
                             dbg!(this.scale_factor);
-                            this.render_image(Reason::ScaleChanged(this.scale_factor), window, cx);
+                            this.render_image(window, cx);
                         }
                     }))
                     .child(
