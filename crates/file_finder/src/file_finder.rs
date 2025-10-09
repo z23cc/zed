@@ -529,8 +529,6 @@ impl Matches {
                 .ok_or(0)
         } else {
             self.matches.binary_search_by(|m| {
-                // `reverse()` since if cmp_matches(a, b) == Ordering::Greater, then a is better than b.
-                // And we want the better entries go first.
                 Self::cmp_matches(self.separate_history, currently_opened, m, entry).reverse()
             })
         }

@@ -63,23 +63,27 @@ impl PartialOrd for PathMatch {
 
 impl Ord for PathMatch {
     fn cmp(&self, other: &Self) -> Ordering {
+        // dbg!(&self.path, &other.path);
+        // dbg!(self.score, other.score);
         self.score
             .total_cmp(&other.score)
             .reverse()
             .then_with(|| self.worktree_id.cmp(&other.worktree_id))
             .then_with(|| {
-                other
-                    .distance_to_relative_ancestor
-                    .cmp(&self.distance_to_relative_ancestor)
+
+                    other
+                        .distance_to_relative_ancestor
+                        .cmp(&self.distance_to_relative_ancestor)
+                )
             })
+            // see shorter_over_lexographical test for an example of why we want this
             .then_with(|| {
                 self.path
                     .as_unix_str()
                     .chars()
                     .count()
                     .cmp(&other.path.as_unix_str().chars().count())
-                    .reverse()
-            })
+            }
             .then_with(|| self.path.cmp(&other.path))
     }
 }
@@ -124,7 +128,7 @@ pub fn match_fixed_path_set(
         };
     }
     matcher::return_matcher(matcher);
-    util::truncate_to_bottom_n_sorted_by(&mut results, max_results, &|a, b| b.cmp(a));
+    util::truncate_to_bottom_n_sorted(&mut results, max_results);
     for r in &mut results {
         r.positions.sort();
     }
@@ -289,7 +293,7 @@ pub async fn match_path_sets<'a, Set: PathMatchCandidateSet<'a>>(
     matcher::return_matchers(matchers);
 
     let mut results = segment_results.concat();
-    util::truncate_to_bottom_n_sorted_by(&mut results, max_results, &|a, b| b.cmp(a));
+    util::truncate_to_bottom_n_sorted(&mut results, max_results);
     for r in &mut results {
         r.positions.sort();
     }
@@ -448,29 +452,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn dot_should_change_order(cx: &mut TestAppContext) {
-        // TODO FIXME or should it?
-        const CANDIDATES: &'static [&'static str] = &[
-            "crates/gpui_macros/Cargo.toml",
-            "crates/gpui_tokio/Cargo.toml",
-            "crates/gpui/Cargo.toml",
-        ];
-
-        // The dot makes the word gpui a 5 letter word. So
-        // `crates/gpui/Cargo.toml` is now a bad match since `gpui` is only 4
-        // letters macros comes first alphabatically and '.' comes before the
-        // alphabet :)
-        assert_eq!(
-            path_matches(cx, CANDIDATES, "toml gpui.").await,
-            [
-                "crates/gpui_macros/Cargo.toml",
-                "crates/gpui_tokio/Cargo.toml",
-                "crates/gpui/Cargo.toml",
-            ]
-        );
-    }
-
-    #[gpui::test]
     async fn test_path_matcher(cx: &mut TestAppContext) {
         const CANDIDATES: &'static [&'static str] = &[
             "blue", "red", "purple", "pink", "green", "yellow", "magenta", "orange", "ocean",
@@ -479,5 +460,13 @@ mod tests {
         assert_eq!(path_matches(cx, CANDIDATES, "bl").await, ["blue"]);
     }
 
+    #[gpui::test]
+    async fn shorter_over_lexographical(cx: &mut TestAppContext) {
+        const CANDIDATES: &'static [&'static str] = &["qr", "qqqqqqqqqqqq"];
+        assert_eq!(
+            path_matches(cx, CANDIDATES, "q").await,
+            ["qr", "qqqqqqqqqqqq"]
+        );
+    }
     // TODO: add perf test on zed repo
 }

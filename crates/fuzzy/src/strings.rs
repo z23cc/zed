@@ -93,12 +93,12 @@ impl PartialOrd for StringMatch {
 
 impl Ord for StringMatch {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        dbg!(&self.string, self.score);
-        dbg!(&other.string, other.score);
+        // dbg!(&self.string, self.score);
+        // dbg!(&other.string, other.score);
         self.score
-            .partial_cmp(&other.score)
-            .unwrap_or(cmp::Ordering::Equal)
-            .then_with(|| self.string.cmp(&other.string).reverse())
+            .total_cmp(&other.score)
+            .reverse()
+            .then_with(|| self.string.cmp(&other.string))
     }
 }
 
@@ -106,7 +106,7 @@ pub async fn match_strings<T>(
     candidates: &[T],
     query: &str,
     smart_case: bool,
-    penalize_length: bool,
+    prefer_shorter: bool,
     max_results: usize,
     cancel_flag: &AtomicBool,
     executor: BackgroundExecutor,
@@ -176,13 +176,14 @@ where
                             matcher,
                             &mut indices,
                         ) {
+                            let length_modifier = candidate.string.chars().count() as f64 / 10_000.;
                             results.push(StringMatch {
                                 candidate_id: candidate.id,
                                 score: score as f64
-                                    + if penalize_length {
-                                        0.
+                                    + if prefer_shorter {
+                                        -length_modifier
                                     } else {
-                                        candidate.string.chars().count() as f64 / 10_000.
+                                        length_modifier
                                     },
                                 positions: indices.into_iter().map(|n| n as usize).collect(),
                                 string: candidate.string.clone(),
@@ -201,7 +202,7 @@ where
     }
 
     let mut results = segment_results.concat();
-    util::truncate_to_bottom_n_sorted_by(&mut results, max_results, &|a, b| b.cmp(a));
+    util::truncate_to_bottom_n_sorted(&mut results, max_results);
     results
 }
 
@@ -264,6 +265,15 @@ mod tests {
         assert_eq!(
             string_matches(cx, candidates, "unreac", false).await,
             ["unreachable!()", "unreachable",]
+        );
+    }
+
+    #[gpui::test]
+    async fn shorter_over_lexographical(cx: &mut TestAppContext) {
+        const CANDIDATES: &'static [&'static str] = &["qr", "qqqqqqqqqqqq"];
+        assert_eq!(
+            string_matches(cx, CANDIDATES, "q", true).await,
+            ["qr", "qqqqqqqqqqqq"]
         );
     }
 }
