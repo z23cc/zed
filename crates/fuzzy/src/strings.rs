@@ -93,10 +93,12 @@ impl PartialOrd for StringMatch {
 
 impl Ord for StringMatch {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
+        dbg!(&self.string, self.score);
+        dbg!(&other.string, other.score);
         self.score
             .partial_cmp(&other.score)
             .unwrap_or(cmp::Ordering::Equal)
-            .then_with(|| self.candidate_id.cmp(&other.candidate_id))
+            .then_with(|| self.string.cmp(&other.string).reverse())
     }
 }
 
@@ -104,7 +106,7 @@ pub async fn match_strings<T>(
     candidates: &[T],
     query: &str,
     smart_case: bool,
-    prefer_prefix: bool,
+    penalize_length: bool,
     max_results: usize,
     cancel_flag: &AtomicBool,
     executor: BackgroundExecutor,
@@ -146,7 +148,7 @@ where
         .collect::<Vec<_>>();
 
     let mut config = nucleo::Config::DEFAULT;
-    config.prefer_prefix = prefer_prefix;
+    config.prefer_prefix = true; // TODO: consider making this a setting
     let mut matchers = matcher::get_matchers(num_cpus, config);
 
     executor
@@ -176,7 +178,12 @@ where
                         ) {
                             results.push(StringMatch {
                                 candidate_id: candidate.id,
-                                score: score as f64,
+                                score: score as f64
+                                    + if penalize_length {
+                                        0.
+                                    } else {
+                                        candidate.string.chars().count() as f64 / 10_000.
+                                    },
                                 positions: indices.into_iter().map(|n| n as usize).collect(),
                                 string: candidate.string.clone(),
                             })
@@ -196,4 +203,67 @@ where
     let mut results = segment_results.concat();
     util::truncate_to_bottom_n_sorted_by(&mut results, max_results, &|a, b| b.cmp(a));
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use gpui::TestAppContext;
+
+    use crate::StringMatchCandidate;
+
+    async fn string_matches(
+        cx: &mut TestAppContext,
+        candidates: &[&'static str],
+        query: &'static str,
+        penalize_length: bool,
+    ) -> Vec<String> {
+        let candidates: Vec<_> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, s)| StringMatchCandidate::new(i, s))
+            .collect();
+
+        let cancellation_flag = AtomicBool::new(false);
+        let executor = cx.background_executor.clone();
+        let matches = cx
+            .foreground_executor
+            .spawn(async move {
+                super::match_strings(
+                    &candidates,
+                    query,
+                    true,
+                    penalize_length,
+                    100,
+                    &cancellation_flag,
+                    executor,
+                )
+                .await
+            })
+            .await;
+
+        matches
+            .iter()
+            .map(|sm| sm.string.clone())
+            .collect::<Vec<_>>()
+    }
+
+    #[gpui::test]
+    async fn prefer_shorter_matches(cx: &mut TestAppContext) {
+        let candidates = &["a", "aa", "aaa"];
+        assert_eq!(
+            string_matches(cx, candidates, "a", true).await,
+            ["a", "aa", "aaa"]
+        );
+    }
+
+    #[gpui::test]
+    async fn prefer_longer_matches(cx: &mut TestAppContext) {
+        let candidates = &["unreachable", "unreachable!()"];
+        assert_eq!(
+            string_matches(cx, candidates, "unreac", false).await,
+            ["unreachable!()", "unreachable",]
+        );
+    }
 }

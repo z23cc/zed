@@ -6433,10 +6433,9 @@ dependencies = [
  "gpui",
  "log",
  "nucleo",
- "util",
- "util_macros",
  "workspace-hack",
  "zed-util",
+ "zed-util-macros",
 ]
 
 [[package]]

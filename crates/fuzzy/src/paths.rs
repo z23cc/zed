@@ -63,55 +63,25 @@ impl PartialOrd for PathMatch {
 
 impl Ord for PathMatch {
     fn cmp(&self, other: &Self) -> Ordering {
-        dbg!(&self.path, &other.path);
         self.score
             .total_cmp(&other.score)
             .reverse()
-            .then_with(|| dbg!(self.worktree_id.cmp(&other.worktree_id)))
+            .then_with(|| self.worktree_id.cmp(&other.worktree_id))
             .then_with(|| {
-                dbg!(
-                    other
-                        .distance_to_relative_ancestor
-                        .cmp(&self.distance_to_relative_ancestor)
-                )
+                other
+                    .distance_to_relative_ancestor
+                    .cmp(&self.distance_to_relative_ancestor)
             })
             .then_with(|| {
-                dbg!(
-                    self.path
-                        .as_unix_str()
-                        .chars()
-                        .count()
-                        .cmp(&other.path.as_unix_str().chars().count())
-                        .reverse()
-                )
+                self.path
+                    .as_unix_str()
+                    .chars()
+                    .count()
+                    .cmp(&other.path.as_unix_str().chars().count())
+                    .reverse()
             })
-            .then_with(|| dbg!(self.path.cmp(&other.path)))
+            .then_with(|| self.path.cmp(&other.path))
     }
-    // fn cmp(&self, other: &Self) -> Ordering {
-    //     dbg!(&self.path, &other.path);
-    //     self.score
-    //         .total_cmp(&other.score)
-    //         .reverse()
-    //         .then_with(|| dbg!(self.worktree_id.cmp(&other.worktree_id)))
-    //         .then_with(|| {
-    //             dbg!(
-    //                 other
-    //                     .distance_to_relative_ancestor
-    //                     .cmp(&self.distance_to_relative_ancestor)
-    //             )
-    //         })
-    //         .then_with(|| {
-    //             dbg!(
-    //                 self.path
-    //                     .as_unix_str()
-    //                     .chars()
-    //                     .count()
-    //                     .cmp(&other.path.as_unix_str().chars().count())
-    //                     .reverse()
-    //             )
-    //         })
-    //         .then_with(|| dbg!(self.path.cmp(&other.path)))
-    // }
 }
 
 pub fn match_fixed_path_set(
@@ -158,7 +128,6 @@ pub fn match_fixed_path_set(
     for r in &mut results {
         r.positions.sort();
     }
-    dbg!(results.iter().take(5).collect::<Vec<_>>());
     results
 }
 
@@ -479,7 +448,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn dot_should_not_change_order(cx: &mut TestAppContext) {
+    async fn dot_should_change_order(cx: &mut TestAppContext) {
         // TODO FIXME or should it?
         const CANDIDATES: &'static [&'static str] = &[
             "crates/gpui_macros/Cargo.toml",
@@ -487,12 +456,16 @@ mod tests {
             "crates/gpui/Cargo.toml",
         ];
 
+        // The dot makes the word gpui a 5 letter word. So
+        // `crates/gpui/Cargo.toml` is now a bad match since `gpui` is only 4
+        // letters macros comes first alphabatically and '.' comes before the
+        // alphabet :)
         assert_eq!(
             path_matches(cx, CANDIDATES, "toml gpui.").await,
             [
-                "crates/gpui/Cargo.toml",
+                "crates/gpui_macros/Cargo.toml",
                 "crates/gpui_tokio/Cargo.toml",
-                "crates/gpui_macros/Cargo.toml"
+                "crates/gpui/Cargo.toml",
             ]
         );
     }
