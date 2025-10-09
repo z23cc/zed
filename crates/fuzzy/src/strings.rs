@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn shorter_over_lexographical(cx: &mut TestAppContext) {
+    async fn shorter_over_lexicographical(cx: &mut TestAppContext) {
         const CANDIDATES: &'static [&'static str] = &["qr", "qqqqqqqqqqqq"];
         assert_eq!(
             string_matches(cx, CANDIDATES, "q", true).await,

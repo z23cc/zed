@@ -70,20 +70,18 @@ impl Ord for PathMatch {
             .reverse()
             .then_with(|| self.worktree_id.cmp(&other.worktree_id))
             .then_with(|| {
-
-                    other
-                        .distance_to_relative_ancestor
-                        .cmp(&self.distance_to_relative_ancestor)
-                )
+                other
+                    .distance_to_relative_ancestor
+                    .cmp(&self.distance_to_relative_ancestor)
             })
-            // see shorter_over_lexographical test for an example of why we want this
+            // see shorter_over_lexicographical test for an example of why we want this
             .then_with(|| {
                 self.path
                     .as_unix_str()
                     .chars()
                     .count()
                     .cmp(&other.path.as_unix_str().chars().count())
-            }
+            })
             .then_with(|| self.path.cmp(&other.path))
     }
 }
@@ -452,6 +450,28 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn denoise(cx: &mut TestAppContext) {
+        const CANDIDATES: &'static [&'static str] = &[
+            "crates/debug_adapter_extension/Cargo.toml",
+            "crates/debugger_tools/Cargo.toml",
+            "crates/debugger_ui/Cargo.toml",
+            "crates/deepseek/Cargo.toml",
+            "crates/denoise/Cargo.toml",
+        ];
+
+        assert_eq!(
+            path_matches(cx, CANDIDATES, "toml de").await,
+            [
+                "crates/denoise/Cargo.toml",
+                "crates/deepseek/Cargo.toml",
+                "crates/debugger_ui/Cargo.toml",
+                "crates/debugger_tools/Cargo.toml",
+                "crates/debug_adapter_extension/Cargo.toml",
+            ]
+        );
+    }
+
+    #[gpui::test]
     async fn test_path_matcher(cx: &mut TestAppContext) {
         const CANDIDATES: &'static [&'static str] = &[
             "blue", "red", "purple", "pink", "green", "yellow", "magenta", "orange", "ocean",
@@ -461,7 +481,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn shorter_over_lexographical(cx: &mut TestAppContext) {
+    async fn shorter_over_lexicographical(cx: &mut TestAppContext) {
         const CANDIDATES: &'static [&'static str] = &["qr", "qqqqqqqqqqqq"];
         assert_eq!(
             path_matches(cx, CANDIDATES, "q").await,
