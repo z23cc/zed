@@ -203,23 +203,25 @@ where
 
     let mut results = segment_results.concat();
     util::truncate_to_bottom_n_sorted(&mut results, max_results);
+    for r in &mut results {
+        r.positions.sort();
+    }
     results
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::sync::atomic::AtomicBool;
 
     use gpui::TestAppContext;
 
-    use crate::StringMatchCandidate;
-
-    async fn string_matches(
+    async fn get_matches(
         cx: &mut TestAppContext,
         candidates: &[&'static str],
         query: &'static str,
         penalize_length: bool,
-    ) -> Vec<String> {
+    ) -> Vec<StringMatch> {
         let candidates: Vec<_> = candidates
             .iter()
             .enumerate()
@@ -228,8 +230,7 @@ mod tests {
 
         let cancellation_flag = AtomicBool::new(false);
         let executor = cx.background_executor.clone();
-        let matches = cx
-            .foreground_executor
+        cx.foreground_executor
             .spawn(async move {
                 super::match_strings(
                     &candidates,
@@ -242,12 +243,30 @@ mod tests {
                 )
                 .await
             })
-            .await;
+            .await
+    }
 
+    async fn string_matches(
+        cx: &mut TestAppContext,
+        candidates: &[&'static str],
+        query: &'static str,
+        penalize_length: bool,
+    ) -> Vec<String> {
+        let matches = get_matches(cx, candidates, query, penalize_length).await;
         matches
             .iter()
             .map(|sm| sm.string.clone())
             .collect::<Vec<_>>()
+    }
+
+    async fn match_positions(
+        cx: &mut TestAppContext,
+        candidates: &[&'static str],
+        query: &'static str,
+        penalize_length: bool,
+    ) -> Vec<usize> {
+        let mut matches = get_matches(cx, candidates, query, penalize_length).await;
+        matches.remove(0).positions
     }
 
     #[gpui::test]
@@ -275,5 +294,17 @@ mod tests {
             string_matches(cx, CANDIDATES, "q", true).await,
             ["qr", "qqqqqqqqqqqq"]
         );
+    }
+
+    #[gpui::test]
+    async fn indices_are_sorted_and_correct(cx: &mut TestAppContext) {
+        const CANDIDATES: &'static [&'static str] = &["hello how are you"];
+        assert_eq!(
+            match_positions(cx, CANDIDATES, "you hello", true).await,
+            vec![0, 1, 2, 3, 4, 14, 15, 16]
+        );
+
+        // const CANDIDATES: &'static [&'static str] =
+        //     &["crates/livekit_api/vendored/protocol/README.md"];
     }
 }

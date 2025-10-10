@@ -63,8 +63,11 @@ impl PartialOrd for PathMatch {
 
 impl Ord for PathMatch {
     fn cmp(&self, other: &Self) -> Ordering {
-        // dbg!(&self.path, &other.path);
-        // dbg!(self.score, other.score);
+        println!(
+            "{:?}: {}, {:?} {}",
+            self.path, self.score, other.path, other.score
+        );
+        dbg!(self.score, other.score);
         self.score
             .total_cmp(&other.score)
             .reverse()
@@ -489,4 +492,16 @@ mod tests {
         );
     }
     // TODO: add perf test on zed repo
+
+    #[gpui::test]
+    async fn prefer_single_word_match_to_multiple_fragments(cx: &mut TestAppContext) {
+        const CANDIDATES: &'static [&'static str] = &[
+            "crates/theme_importer/README.md",
+            "extensions/test-extension/README.md",
+            "extensions/slash-commands-example/README.md",
+            "crates/livekit_api/vendored/protocol/README.md",
+            "crates/assistant_tools/src/read_file_tool/description.md",
+        ];
+        assert_eq!(path_matches(cx, CANDIDATES, "read").await, CANDIDATES);
+    }
 }
