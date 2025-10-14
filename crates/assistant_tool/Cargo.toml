@@ -29,7 +29,6 @@ serde_json.workspace = true
 text.workspace = true
 util.workspace = true
 workspace.workspace = true
-workspace-hack.workspace = true
 
 [dev-dependencies]
 buffer_diff = { workspace = true, features = ["test-support"] }
