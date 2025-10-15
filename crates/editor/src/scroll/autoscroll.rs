@@ -157,14 +157,16 @@ impl Editor {
                 .to_display_point(&display_map)
                 .row()
                 .as_f64();
-            target_bottom = selections
-                .last()
-                .unwrap()
-                .head()
-                .to_display_point(&display_map)
-                .row()
-                .next_row()
-                .as_f64();
+            target_bottom = dbg!(
+                selections
+                    .last()
+                    .unwrap()
+                    .head()
+                    .to_display_point(&display_map)
+            )
+            .row()
+            .next_row()
+            .as_f64();
 
             let selections_fit = target_bottom - target_top <= visible_lines;
             if matches!(
@@ -229,7 +231,9 @@ impl Editor {
                 if needs_scroll_up && !needs_scroll_down {
                     scroll_position.y = target_top;
                 } else if !needs_scroll_up && needs_scroll_down {
-                    scroll_position.y = target_bottom - visible_lines;
+                    dbg!(scroll_position.y);
+                    scroll_position.y = dbg!(target_bottom) - dbg!(visible_lines);
+                    dbg!(scroll_position.y);
                 }
 
                 if needs_scroll_up ^ needs_scroll_down {

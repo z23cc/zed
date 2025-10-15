@@ -582,7 +582,7 @@ impl MessageEditor {
 
             let crease_id = self.editor.update(cx, |editor, cx| {
                 let crease_ids = editor.insert_creases(vec![crease.clone()], cx);
-                editor.fold_creases(vec![crease], false, window, cx);
+                editor.fold_creases(vec![crease], true, window, cx);
                 crease_ids.first().copied().unwrap()
             });
 
@@ -1365,7 +1365,7 @@ pub(crate) fn insert_crease_for_mention(
         };
 
         let ids = editor.insert_creases(vec![crease.clone()], cx);
-        editor.fold_creases(vec![crease], false, window, cx);
+        editor.fold_creases(vec![crease], true, window, cx);
 
         Some(ids[0])
     })?;
