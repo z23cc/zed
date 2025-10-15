@@ -2443,6 +2443,7 @@ impl LocalSnapshot {
     }
 
     fn insert_entry(&mut self, mut entry: Entry, fs: &dyn Fs) -> Entry {
+        log::trace!("insert entry {:?}", entry.path);
         if entry.is_file() && entry.path.file_name() == Some(&GITIGNORE) {
             let abs_path = self.absolutize(&entry.path);
             match self.executor.block(build_gitignore(&abs_path, fs)) {
@@ -3798,6 +3799,7 @@ impl BackgroundScanner {
     }
 
     async fn process_events(&self, mut abs_paths: Vec<PathBuf>) {
+        log::trace!("process events: {abs_paths:?}");
         let root_path = self.state.lock().await.snapshot.abs_path.clone();
         let root_canonical_path = self.fs.canonicalize(root_path.as_path()).await;
         let root_canonical_path = match &root_canonical_path {
@@ -4412,7 +4414,6 @@ impl BackgroundScanner {
         // detected regardless of the order of the paths.
         for (path, metadata) in relative_paths.iter().zip(metadata.iter()) {
             if matches!(metadata, Ok(None)) || doing_recursive_update {
-                log::trace!("remove path {:?}", path);
                 state.remove_path(path);
             }
         }
