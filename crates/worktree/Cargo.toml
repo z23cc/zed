@@ -12,7 +12,7 @@ doctest = false
 [[bin]]
 name = "bench_background_scan"
 path = "bin/bench_background_scan.rs"
-required-features = ["gpui/windows-manifest"]
+
 [lints]
 workspace = true
 
