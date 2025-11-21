@@ -5388,6 +5388,7 @@ dependencies = [
  "rope",
  "rpc",
  "schemars",
+ "semantic_version",
  "serde",
  "serde_json",
  "settings",
